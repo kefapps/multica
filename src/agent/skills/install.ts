@@ -15,6 +15,7 @@ import { DATA_DIR } from "../../shared/index.js";
 import type { Skill, SkillInstallSpec, SkillsInstallConfig } from "./types.js";
 import { getSkillKey } from "./types.js";
 import { binaryExists } from "./eligibility.js";
+import { serialize, SerializeKeys } from "./serialize.js";
 
 // ============================================================================
 // Types
@@ -481,10 +482,25 @@ function checkInstallPrerequisites(
 /**
  * Install skill dependencies
  *
+ * Operations are serialized to prevent concurrent installations
+ * of the same skill from interfering with each other.
+ *
  * @param request - Install request
  * @returns Install result
  */
 export async function installSkill(
+  request: SkillInstallRequest,
+): Promise<SkillInstallResult> {
+  // Serialize operations for the same skill
+  return serialize(SerializeKeys.skillInstall(request.skill.id), () =>
+    installSkillInternal(request),
+  );
+}
+
+/**
+ * Internal implementation of installSkill (serialized)
+ */
+async function installSkillInternal(
   request: SkillInstallRequest,
 ): Promise<SkillInstallResult> {
   const { skill, installId, prefs } = request;

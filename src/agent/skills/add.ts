@@ -17,6 +17,7 @@ import { existsSync } from "node:fs";
 import { DATA_DIR } from "../../shared/index.js";
 import { binaryExists } from "./eligibility.js";
 import { bumpSkillsVersion } from "./watcher.js";
+import { serialize, SerializeKeys } from "./serialize.js";
 
 // ============================================================================
 // Types
@@ -356,8 +357,23 @@ async function isSkillDirectory(dir: string): Promise<boolean> {
 
 /**
  * Add a skill from a GitHub repository
+ *
+ * Operations are serialized to prevent concurrent modifications
+ * to the same skill directory.
  */
 export async function addSkill(request: SkillAddRequest): Promise<SkillAddResult> {
+  // Parse source to determine the target name for serialization key
+  const parsed = parseSource(request.source);
+  const targetName = request.name ?? (parsed?.skillPath ? basename(parsed.skillPath) : parsed?.repo ?? "default");
+
+  // Serialize operations for the same target
+  return serialize(SerializeKeys.skillAdd(targetName), () => addSkillInternal(request));
+}
+
+/**
+ * Internal implementation of addSkill (serialized)
+ */
+async function addSkillInternal(request: SkillAddRequest): Promise<SkillAddResult> {
   const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   // Check git is available
@@ -489,8 +505,17 @@ export async function addSkill(request: SkillAddRequest): Promise<SkillAddResult
 
 /**
  * Remove an installed skill
+ *
+ * Operations are serialized to prevent concurrent modifications.
  */
 export async function removeSkill(name: string): Promise<SkillAddResult> {
+  return serialize(SerializeKeys.skillRemove(name), () => removeSkillInternal(name));
+}
+
+/**
+ * Internal implementation of removeSkill (serialized)
+ */
+async function removeSkillInternal(name: string): Promise<SkillAddResult> {
   const targetDir = join(SKILLS_DIR, name);
 
   if (!existsSync(targetDir)) {
