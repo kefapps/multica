@@ -6,6 +6,7 @@ import {
   PROCESS_REGISTRY,
   registerProcess,
   cleanupTerminatedProcesses,
+  getFullOutput,
 } from "./process-registry.js";
 
 const ProcessSchema = Type.Object({
@@ -138,10 +139,10 @@ export function createProcessTool(defaultCwd?: string): AgentTool<typeof Process
             details: { id, running: false },
           };
         }
-        const output = entry.outputBuffer.join("");
+        const { output, truncated } = getFullOutput(entry);
         const running = entry.exitCode === null;
         return {
-          content: [{ type: "text", text: output || "(no output)" }],
+          content: [{ type: "text", text: (output || "(no output)") + (truncated ? "\n[output truncated]" : "") }],
           details: { id, running, exitCode: entry.exitCode, output },
         };
       }

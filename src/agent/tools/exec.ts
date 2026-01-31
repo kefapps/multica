@@ -1,7 +1,12 @@
 import { spawn } from "child_process";
 import { Type } from "@sinclair/typebox";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
-import { registerProcess } from "./process-registry.js";
+import {
+  registerProcess,
+  getOutputSnapshot,
+  getFullOutput,
+  PROCESS_REGISTRY,
+} from "./process-registry.js";
 
 const ExecSchema = Type.Object({
   command: Type.String({ description: "Shell command to execute." }),
@@ -12,7 +17,7 @@ const ExecSchema = Type.Object({
   yieldMs: Type.Optional(
     Type.Number({
       description:
-        "Auto-background threshold in milliseconds. If command doesn't complete within this time, it runs in background. Default 5000ms. Set to 0 to disable auto-backgrounding.",
+        "Auto-background threshold in milliseconds. If command doesn't complete within this time, it runs in background. Default 10000ms. Set to 0 to disable auto-backgrounding.",
       minimum: 0,
     }),
   ),
@@ -33,15 +38,14 @@ export type ExecResult = {
   processId?: string;
 };
 
-const MAX_OUTPUT_BYTES = 64 * 1024;
-const DEFAULT_YIELD_MS = 5000;
+const DEFAULT_YIELD_MS = 10000; // Changed from 5000 to 10000
 
 export function createExecTool(defaultCwd?: string): AgentTool<typeof ExecSchema, ExecResult> {
   return {
     name: "exec",
     label: "Exec",
     description:
-      "Execute a shell command. If the command doesn't complete within yieldMs (default 5s), it automatically runs in background and returns a process ID. Use 'process output <id>' to check output, 'process status <id>' to check status, 'process stop <id>' to terminate.",
+      "Execute a shell command. If the command doesn't complete within yieldMs (default 10s), it automatically runs in background and returns a process ID with any output collected so far. Use 'process output <id>' to check output, 'process status <id>' to check status, 'process stop <id>' to terminate.",
     parameters: ExecSchema,
     execute: async (_toolCallId, args, signal) => {
       const { command, cwd, timeoutMs, yieldMs = DEFAULT_YIELD_MS } = args as ExecArgs;
@@ -58,6 +62,10 @@ export function createExecTool(defaultCwd?: string): AgentTool<typeof ExecSchema
         let yielded = false;
         let timeout: NodeJS.Timeout | undefined;
         let yieldTimer: NodeJS.Timeout | undefined;
+
+        // Register process immediately to start buffering output
+        // This ensures output is captured even before yield timeout
+        const processId = registerProcess(child, command, effectiveCwd, "exec");
 
         // Timeout handling (hard kill)
         if (timeoutMs && timeoutMs > 0) {
@@ -76,20 +84,27 @@ export function createExecTool(defaultCwd?: string): AgentTool<typeof ExecSchema
             // Clear timeout since we're backgrounding
             if (timeout) clearTimeout(timeout);
 
-            // Register to shared process registry
-            const processId = registerProcess(child, command, effectiveCwd, "exec");
+            // Get output collected so far (THE KEY FIX)
+            const entry = PROCESS_REGISTRY.get(processId);
+            const snapshot = entry
+              ? getOutputSnapshot(entry)
+              : { output: "", truncated: false };
+
+            const outputPreview = snapshot.output
+              ? `\n\nOutput so far:\n${snapshot.output}${snapshot.truncated ? "\n[truncated]" : ""}`
+              : "";
 
             resolve({
               content: [
                 {
                   type: "text",
-                  text: `Command running in background. Process ID: ${processId}\nUse 'process output ${processId}' to check output.`,
+                  text: `Command running in background. Process ID: ${processId}${outputPreview}\n\nUse 'process output ${processId}' to check more output.`,
                 },
               ],
               details: {
-                output: "",
+                output: snapshot.output,
                 exitCode: null,
-                truncated: false,
+                truncated: snapshot.truncated,
                 backgrounded: true,
                 processId,
               },
@@ -97,24 +112,7 @@ export function createExecTool(defaultCwd?: string): AgentTool<typeof ExecSchema
           }, yieldMs);
         }
 
-        const chunks: Buffer[] = [];
-        let size = 0;
-        let truncated = false;
-
-        const handleData = (data: Buffer) => {
-          if (truncated) return;
-          size += data.length;
-          if (size > MAX_OUTPUT_BYTES) {
-            truncated = true;
-            const remaining = MAX_OUTPUT_BYTES - (size - data.length);
-            if (remaining > 0) chunks.push(data.subarray(0, remaining));
-            return;
-          }
-          chunks.push(data);
-        };
-
-        child.stdout?.on("data", handleData);
-        child.stderr?.on("data", handleData);
+        // Note: Output is now collected by process-registry, no local chunk collection needed
 
         let spawnError: Error | null = null;
         child.on("error", (err) => {
@@ -131,6 +129,15 @@ export function createExecTool(defaultCwd?: string): AgentTool<typeof ExecSchema
           // If already backgrounded, don't resolve again
           if (yielded) return;
 
+          // Get output from registry buffer
+          const entry = PROCESS_REGISTRY.get(processId);
+          const { output, truncated } = entry
+            ? getFullOutput(entry)
+            : { output: "", truncated: false };
+
+          // Remove from registry since we're returning synchronously
+          PROCESS_REGISTRY.delete(processId);
+
           // If there's a spawn error, return error message
           if (spawnError) {
             resolve({
@@ -144,7 +151,6 @@ export function createExecTool(defaultCwd?: string): AgentTool<typeof ExecSchema
             return;
           }
 
-          const output = Buffer.concat(chunks).toString("utf8");
           resolve({
             content: [{ type: "text", text: output || (timedOut ? "Process timed out." : "") }],
             details: {
