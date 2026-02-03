@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from "fs";
 import { appendFile, writeFile } from "fs/promises";
 import type { SessionEntry } from "./types.js";
 import { DATA_DIR } from "../../shared/index.js";
+import { acquireSessionWriteLock } from "./session-write-lock.js";
 
 export type SessionStorageOptions = {
   baseDir?: string | undefined;
@@ -50,7 +51,12 @@ export async function appendEntry(
 ) {
   ensureSessionDir(sessionId, options);
   const filePath = resolveSessionPath(sessionId, options);
-  await appendFile(filePath, `${JSON.stringify(entry)}\n`, "utf8");
+  const lock = await acquireSessionWriteLock({ sessionFile: filePath });
+  try {
+    await appendFile(filePath, `${JSON.stringify(entry)}\n`, "utf8");
+  } finally {
+    await lock.release();
+  }
 }
 
 export async function writeEntries(
@@ -60,6 +66,11 @@ export async function writeEntries(
 ) {
   ensureSessionDir(sessionId, options);
   const filePath = resolveSessionPath(sessionId, options);
-  const content = entries.map((entry) => JSON.stringify(entry)).join("\n");
-  await writeFile(filePath, content ? `${content}\n` : "", "utf8");
+  const lock = await acquireSessionWriteLock({ sessionFile: filePath });
+  try {
+    const content = entries.map((entry) => JSON.stringify(entry)).join("\n");
+    await writeFile(filePath, content ? `${content}\n` : "", "utf8");
+  } finally {
+    await lock.release();
+  }
 }

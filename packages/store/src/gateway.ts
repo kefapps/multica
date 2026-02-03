@@ -1,5 +1,5 @@
 import { create } from "zustand"
-import { GatewayClient, StreamAction, type ConnectionState, type DeviceInfo, type SendErrorResponse, type StreamPayload } from "@multica/sdk"
+import { GatewayClient, StreamAction, extractTextFromEvent, type ConnectionState, type DeviceInfo, type SendErrorResponse, type StreamPayload, type StreamMessageEvent } from "@multica/sdk"
 import { useMessagesStore } from "./messages"
 
 const DEFAULT_GATEWAY_URL = "http://localhost:3000"
@@ -45,26 +45,32 @@ export const useGatewayStore = create<GatewayStore>()((set, get) => ({
     })
       .onStateChange((connectionState) => set({ connectionState }))
       .onMessage((msg) => {
-        // Handle streaming messages
+        // Handle streaming messages (new protocol: payload.event is a raw AgentEvent)
         if (msg.action === StreamAction) {
           const payload = msg.payload as StreamPayload
           const store = useMessagesStore.getState()
-          switch (payload.state) {
-            case "delta": {
-              const exists = store.messages.some((m) => m.id === payload.streamId)
-              if (!exists) {
-                store.startStream(payload.streamId, payload.agentId)
-              }
-              if (payload.content) {
-                store.appendStream(payload.streamId, payload.content)
-              }
+          const { event } = payload
+
+          switch (event.type) {
+            case "message_start": {
+              store.startStream(payload.streamId, payload.agentId)
+              const text = extractTextFromEvent(event as StreamMessageEvent)
+              if (text) store.appendStream(payload.streamId, text)
               break
             }
-            case "final":
-              store.endStream(payload.streamId, payload.content ?? "")
+            case "message_update": {
+              const text = extractTextFromEvent(event as StreamMessageEvent)
+              store.appendStream(payload.streamId, text)
               break
-            case "error":
-              store.endStream(payload.streamId, `[error] ${payload.error}`)
+            }
+            case "message_end": {
+              const text = extractTextFromEvent(event as StreamMessageEvent)
+              store.endStream(payload.streamId, text)
+              break
+            }
+            case "tool_execution_start":
+            case "tool_execution_end":
+              // TODO: surface tool execution status in UI
               break
           }
           return

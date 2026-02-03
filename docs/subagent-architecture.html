@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Subagent Orchestration Architecture</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #39d2c0;
+    --pink: #f778ba;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 40px 20px;
+    line-height: 1.6;
+  }
+
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    text-align: center;
+    font-size: 28px;
+    margin-bottom: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .subtitle {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 14px;
+    margin-bottom: 48px;
+  }
+
+  h2 {
+    font-size: 20px;
+    margin: 48px 0 24px;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  h2::before {
+    content: '';
+    display: inline-block;
+    width: 4px;
+    height: 20px;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+
+  /* ── Architecture Diagram ── */
+  .arch-diagram {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 20px;
+    position: relative;
+  }
+
+  .arch-row {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+
+  .arch-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    min-width: 200px;
+    max-width: 320px;
+    position: relative;
+  }
+
+  .arch-box.wide { min-width: 500px; }
+
+  @media (max-width: 640px) {
+    .arch-box.wide { min-width: 100%; }
+  }
+
+  .arch-box .title {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .arch-box .desc {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  .arch-box .file {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: 'SF Mono', Consolas, monospace;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .badge-blue { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge-purple { background: rgba(188,140,255,0.15); color: var(--purple); }
+  .badge-orange { background: rgba(210,153,34,0.15); color: var(--orange); }
+  .badge-cyan { background: rgba(57,210,192,0.15); color: var(--cyan); }
+  .badge-pink { background: rgba(247,120,186,0.15); color: var(--pink); }
+
+  /* ── SVG Arrows ── */
+  .arrow-section {
+    display: flex;
+    justify-content: center;
+    padding: 4px 0;
+  }
+
+  .arrow-section svg {
+    overflow: visible;
+  }
+
+  /* ── Call Chain ── */
+  .call-chain {
+    position: relative;
+    padding-left: 32px;
+  }
+
+  .call-chain::before {
+    content: '';
+    position: absolute;
+    left: 15px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--accent), var(--purple), var(--green));
+    border-radius: 1px;
+  }
+
+  .chain-step {
+    position: relative;
+    margin-bottom: 20px;
+    padding: 16px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    transition: border-color 0.2s;
+  }
+
+  .chain-step:hover {
+    border-color: var(--accent);
+  }
+
+  .chain-step::before {
+    content: attr(data-step);
+    position: absolute;
+    left: -32px;
+    top: 16px;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transform: translateX(-4px);
+  }
+
+  .chain-step.phase-spawn::before { background: var(--accent); }
+  .chain-step.phase-watch::before { background: var(--purple); }
+  .chain-step.phase-complete::before { background: var(--green); }
+  .chain-step.phase-cleanup::before { background: var(--orange); }
+
+  .chain-step .step-title {
+    font-weight: 600;
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+
+  .chain-step .step-detail {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .chain-step code {
+    background: rgba(88,166,255,0.1);
+    color: var(--accent);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: 'SF Mono', Consolas, monospace;
+  }
+
+  .chain-step .arrow-label {
+    font-size: 11px;
+    color: var(--cyan);
+    font-family: 'SF Mono', Consolas, monospace;
+    margin-top: 6px;
+  }
+
+  /* ── Sequence Diagram ── */
+  .sequence-container {
+    overflow-x: auto;
+    padding: 20px 0;
+  }
+
+  .sequence-diagram {
+    min-width: 900px;
+    margin: 0 auto;
+  }
+
+  /* ── Module Map ── */
+  .module-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+  }
+
+  .module-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+  }
+
+  .module-card .mod-name {
+    font-weight: 600;
+    font-size: 14px;
+    font-family: 'SF Mono', Consolas, monospace;
+    margin-bottom: 4px;
+  }
+
+  .module-card .mod-desc {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+
+  .module-card .mod-exports {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: 'SF Mono', Consolas, monospace;
+  }
+
+  .module-card .mod-exports span {
+    color: var(--green);
+  }
+
+  /* ── State Machine ── */
+  .state-diagram {
+    display: flex;
+    justify-content: center;
+    padding: 20px 0;
+  }
+
+  .state-node {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .state-arrow {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 0 6px;
+  }
+
+  .state-arrow svg { margin: 0 4px; }
+
+  .legend {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+    justify-content: center;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Subagent Orchestration Architecture</h1>
+<p class="subtitle">Super Multica &mdash; Parent-child agent spawning, lifecycle management, and result announcement</p>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2>System Architecture</h2>
+<!-- ══════════════════════════════════════════════════════ -->
+
+<div class="arch-diagram">
+
+  <!-- Row 1: Parent Agent -->
+  <div class="arch-row">
+    <div class="arch-box wide" style="border-color: var(--accent);">
+      <div class="title">
+        <span class="badge badge-blue">Agent</span>
+        Parent Agent (Interactive Session)
+      </div>
+      <div class="desc">
+        User-facing agent with full tool access. Can spawn child agents via <code>sessions_spawn</code> tool.
+        Receives announcement messages when child agents complete.
+      </div>
+      <div class="file">src/agent/runner.ts &rarr; tools: sessions_spawn, exec, glob, web_fetch, ...</div>
+    </div>
+  </div>
+
+  <!-- Arrow -->
+  <div class="arrow-section">
+    <svg width="400" height="48">
+      <defs>
+        <marker id="arrow1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff"/>
+        </marker>
+        <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#3fb950"/>
+        </marker>
+      </defs>
+      <!-- spawn arrow (down-left) -->
+      <line x1="140" y1="4" x2="80" y2="40" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow1)"/>
+      <text x="70" y="24" fill="#58a6ff" font-size="11" font-family="monospace">spawn</text>
+      <!-- announce arrow (up-right) -->
+      <line x1="320" y1="40" x2="260" y2="4" stroke="#3fb950" stroke-width="2" stroke-dasharray="6 3" marker-end="url(#arrow2)"/>
+      <text x="282" y="24" fill="#3fb950" font-size="11" font-family="monospace">announce</text>
+    </svg>
+  </div>
+
+  <!-- Row 2: Hub + Registry -->
+  <div class="arch-row">
+    <div class="arch-box" style="border-color: var(--purple);">
+      <div class="title">
+        <span class="badge badge-purple">Singleton</span>
+        Hub
+      </div>
+      <div class="desc">
+        Central coordinator. Creates &amp; manages all agents. Provides <code>createSubagent()</code>,
+        <code>getAgent()</code>, <code>closeAgent()</code>. Calls registry init on startup, shutdown on exit.
+      </div>
+      <div class="file">src/hub/hub.ts + hub-singleton.ts</div>
+    </div>
+
+    <div class="arch-box" style="border-color: var(--orange);">
+      <div class="title">
+        <span class="badge badge-orange">Module</span>
+        Subagent Registry
+      </div>
+      <div class="desc">
+        In-memory Map + JSON persistence. Tracks run lifecycle (created &rarr; started &rarr; ended).
+        Archive sweeper cleans old runs every 60s. Handles crash recovery on restart.
+      </div>
+      <div class="file">src/agent/subagent/registry.ts</div>
+    </div>
+  </div>
+
+  <!-- Arrow -->
+  <div class="arrow-section">
+    <svg width="400" height="48">
+      <defs>
+        <marker id="arrow3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#bc8cff"/>
+        </marker>
+        <marker id="arrow4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#d29922"/>
+        </marker>
+      </defs>
+      <line x1="120" y1="4" x2="120" y2="40" stroke="#bc8cff" stroke-width="2" marker-end="url(#arrow3)"/>
+      <text x="132" y="26" fill="#bc8cff" font-size="11" font-family="monospace">createSubagent()</text>
+      <line x1="280" y1="4" x2="280" y2="40" stroke="#d29922" stroke-width="2" stroke-dasharray="6 3" marker-end="url(#arrow4)"/>
+      <text x="292" y="26" fill="#d29922" font-size="11" font-family="monospace">watchChildAgent()</text>
+    </svg>
+  </div>
+
+  <!-- Row 3: Child Agent + Announce + Store -->
+  <div class="arch-row">
+    <div class="arch-box" style="border-color: var(--cyan);">
+      <div class="title">
+        <span class="badge badge-cyan">Agent</span>
+        Child AsyncAgent
+      </div>
+      <div class="desc">
+        Isolated agent with <code>isSubagent: true</code>. Restricted tools (no <code>sessions_spawn</code>).
+        Custom system prompt: stay focused, no user messaging, no nested spawning.
+      </div>
+      <div class="file">src/agent/async-agent.ts</div>
+    </div>
+
+    <div class="arch-box" style="border-color: var(--green);">
+      <div class="title">
+        <span class="badge badge-green">Flow</span>
+        Announce Module
+      </div>
+      <div class="desc">
+        Reads child's last assistant reply from session JSONL. Formats announcement message with findings, duration, status.
+        Delivers to parent via <code>parentAgent.write()</code>.
+      </div>
+      <div class="file">src/agent/subagent/announce.ts</div>
+    </div>
+
+    <div class="arch-box" style="border-color: var(--text-muted);">
+      <div class="title">
+        <span class="badge" style="background:rgba(139,148,158,0.15);color:var(--text-muted);">Store</span>
+        Registry Store
+      </div>
+      <div class="desc">
+        JSON file persistence at <code>~/.super-multica/subagents/runs.json</code>.
+        Schema: <code>{ version: 1, runs: {...} }</code>. Survives process restarts.
+      </div>
+      <div class="file">src/agent/subagent/registry-store.ts</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2>Call Chain &mdash; Spawn &amp; Lifecycle</h2>
+<!-- ══════════════════════════════════════════════════════ -->
+
+<div class="call-chain">
+
+  <div class="chain-step phase-spawn" data-step="1">
+    <div class="step-title">Parent Agent invokes <code>sessions_spawn</code> tool</div>
+    <div class="step-detail">
+      Agent calls tool with <code>{ task, label?, model?, cleanup?, timeoutSeconds? }</code>.
+      Guard rejects if <code>isSubagent === true</code>.
+    </div>
+    <div class="arrow-label">sessions-spawn.ts &rarr; execute()</div>
+  </div>
+
+  <div class="chain-step phase-spawn" data-step="2">
+    <div class="step-title">Generate IDs &amp; build system prompt</div>
+    <div class="step-detail">
+      <code>runId</code> = UUIDv7, <code>childSessionId</code> = UUIDv7.
+      <code>buildSubagentSystemPrompt()</code> creates prompt with task context, rules (no nested spawn, stay focused).
+    </div>
+    <div class="arrow-label">announce.ts &rarr; buildSubagentSystemPrompt()</div>
+  </div>
+
+  <div class="chain-step phase-spawn" data-step="3">
+    <div class="step-title">Hub creates child AsyncAgent</div>
+    <div class="step-detail">
+      <code>hub.createSubagent(childSessionId, { systemPrompt, model })</code>
+      creates an <code>AsyncAgent</code> with <code>isSubagent: true</code>. Not persisted to agent store (ephemeral).
+    </div>
+    <div class="arrow-label">hub.ts &rarr; createSubagent()</div>
+  </div>
+
+  <div class="chain-step phase-watch" data-step="4">
+    <div class="step-title">Write task to child (non-blocking)</div>
+    <div class="step-detail">
+      <code>childAgent.write(task)</code> enqueues the task to the serial queue.
+      This happens before registration so <code>waitForIdle()</code> observes queued work.
+    </div>
+    <div class="arrow-label">async-agent.ts &rarr; write() (enqueues to serial queue)</div>
+  </div>
+
+  <div class="chain-step phase-spawn" data-step="5">
+    <div class="step-title">Register run in registry</div>
+    <div class="step-detail">
+      <code>registerSubagentRun()</code> saves record to in-memory Map + JSON file.
+      Sets <code>createdAt</code>, starts archive sweeper.
+    </div>
+    <div class="arrow-label">registry.ts &rarr; registerSubagentRun()</div>
+  </div>
+
+  <div class="chain-step phase-watch" data-step="6">
+    <div class="step-title">Start lifecycle watcher &amp; return to parent</div>
+    <div class="step-detail">
+      <code>watchChildAgent()</code> sets <code>startedAt</code>.
+      Attaches <code>childAgent.waitForIdle()</code> (promise resolves when task queue drained)
+      and <code>childAgent.onClose()</code> callback. Optionally sets timeout timer.
+      Tool returns <code>{ status: "accepted", childSessionId, runId }</code> immediately.
+    </div>
+    <div class="arrow-label">registry.ts &rarr; watchChildAgent() &rarr; AsyncAgent.waitForIdle() + onClose()</div>
+  </div>
+
+  <div class="chain-step phase-watch" data-step="7">
+    <div class="step-title">Child agent processes task autonomously</div>
+    <div class="step-detail">
+      Child runs LLM inference with restricted tools. Uses its own session.
+      May call <code>exec</code>, <code>glob</code>, <code>web_fetch</code> etc. but NOT <code>sessions_spawn</code>.
+    </div>
+    <div class="arrow-label">runner.ts &rarr; Agent.run() (within AsyncAgent queue)</div>
+  </div>
+
+  <div class="chain-step phase-complete" data-step="8">
+    <div class="step-title">Child completes &rarr; <code>waitForIdle()</code> resolves</div>
+    <div class="step-detail">
+      Task queue drains. Watcher's cleanup callback fires: sets <code>endedAt</code>, <code>outcome: { status: "ok" }</code>.
+      Persists updated record to JSON.
+    </div>
+    <div class="arrow-label">registry.ts &rarr; cleanup() &rarr; handleRunCompletion()</div>
+  </div>
+
+  <div class="chain-step phase-complete" data-step="9">
+    <div class="step-title">Announce flow: read child reply &amp; deliver to parent</div>
+    <div class="step-detail">
+      <code>readLatestAssistantReply(childSessionId)</code> reads session JSONL, extracts last assistant text.
+      <code>formatAnnouncementMessage()</code> builds summary with task, status, findings, runtime.
+      <code>parentAgent.write(message)</code> delivers to parent.
+    </div>
+    <div class="arrow-label">announce.ts &rarr; runSubagentAnnounceFlow() &rarr; hub.getAgent(parentId).write()</div>
+  </div>
+
+  <div class="chain-step phase-cleanup" data-step="10">
+    <div class="step-title">Session cleanup &amp; archive</div>
+    <div class="step-detail">
+      If <code>cleanup === "delete"</code>: removes child session directory + closes agent in Hub.
+      Schedules archive at <code>now + 60min</code>. Sweeper removes from registry after TTL.
+    </div>
+    <div class="arrow-label">registry.ts &rarr; deleteChildSession() + sweep()</div>
+  </div>
+
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2>Sequence Diagram</h2>
+<!-- ══════════════════════════════════════════════════════ -->
+
+<div class="sequence-container">
+<svg class="sequence-diagram" viewBox="0 0 920 620" width="920" height="620">
+  <style>
+    .seq-text { font-family: -apple-system, sans-serif; font-size: 12px; fill: #e6edf3; }
+    .seq-mono { font-family: 'SF Mono', Consolas, monospace; font-size: 11px; }
+    .seq-label { font-size: 13px; font-weight: 600; }
+    .seq-line { stroke: #30363d; stroke-width: 1; }
+    .seq-lifeline { stroke: #30363d; stroke-width: 1; stroke-dasharray: 6 4; }
+  </style>
+
+  <!-- Column headers -->
+  <rect x="40" y="10" width="130" height="36" rx="6" fill="#161b22" stroke="#58a6ff"/>
+  <text x="105" y="33" text-anchor="middle" class="seq-text seq-label" fill="#58a6ff">Parent Agent</text>
+
+  <rect x="230" y="10" width="130" height="36" rx="6" fill="#161b22" stroke="#d29922"/>
+  <text x="295" y="33" text-anchor="middle" class="seq-text seq-label" fill="#d29922">sessions_spawn</text>
+
+  <rect x="420" y="10" width="100" height="36" rx="6" fill="#161b22" stroke="#bc8cff"/>
+  <text x="470" y="33" text-anchor="middle" class="seq-text seq-label" fill="#bc8cff">Hub</text>
+
+  <rect x="580" y="10" width="120" height="36" rx="6" fill="#161b22" stroke="#d29922"/>
+  <text x="640" y="33" text-anchor="middle" class="seq-text seq-label" fill="#d29922">Registry</text>
+
+  <rect x="760" y="10" width="120" height="36" rx="6" fill="#161b22" stroke="#39d2c0"/>
+  <text x="820" y="33" text-anchor="middle" class="seq-text seq-label" fill="#39d2c0">Child Agent</text>
+
+  <!-- Lifelines -->
+  <line x1="105" y1="46" x2="105" y2="610" class="seq-lifeline"/>
+  <line x1="295" y1="46" x2="295" y2="610" class="seq-lifeline"/>
+  <line x1="470" y1="46" x2="470" y2="610" class="seq-lifeline"/>
+  <line x1="640" y1="46" x2="640" y2="610" class="seq-lifeline"/>
+  <line x1="820" y1="46" x2="820" y2="610" class="seq-lifeline"/>
+
+  <!-- 1. Parent → Tool: call sessions_spawn -->
+  <line x1="105" y1="80" x2="290" y2="80" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#seq-arrow-blue)"/>
+  <text x="198" y="74" text-anchor="middle" class="seq-text seq-mono" fill="#58a6ff">execute({ task, label })</text>
+
+  <!-- 2. Tool → Hub: createSubagent -->
+  <line x1="295" y1="115" x2="465" y2="115" stroke="#bc8cff" stroke-width="1.5" marker-end="url(#seq-arrow-purple)"/>
+  <text x="380" y="109" text-anchor="middle" class="seq-text seq-mono" fill="#bc8cff">createSubagent(id, opts)</text>
+
+  <!-- 3. Hub → Child: new AsyncAgent -->
+  <line x1="470" y1="150" x2="815" y2="150" stroke="#39d2c0" stroke-width="1.5" marker-end="url(#seq-arrow-cyan)"/>
+  <text x="640" y="144" text-anchor="middle" class="seq-text seq-mono" fill="#39d2c0">new AsyncAgent({ isSubagent: true })</text>
+
+  <!-- 4. Tool → Child: write(task) -->
+  <line x1="295" y1="190" x2="815" y2="190" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#seq-arrow-blue)"/>
+  <text x="555" y="184" text-anchor="middle" class="seq-text seq-mono" fill="#58a6ff">childAgent.write(task)</text>
+
+  <!-- 5. Tool → Registry: registerSubagentRun -->
+  <line x1="295" y1="225" x2="635" y2="225" stroke="#d29922" stroke-width="1.5" marker-end="url(#seq-arrow-orange)"/>
+  <text x="465" y="219" text-anchor="middle" class="seq-text seq-mono" fill="#d29922">registerSubagentRun(params)</text>
+
+  <!-- 6. Registry → Child: watchChildAgent (waitForIdle) -->
+  <line x1="640" y1="260" x2="815" y2="260" stroke="#d29922" stroke-width="1.5" stroke-dasharray="6 3" marker-end="url(#seq-arrow-orange)"/>
+  <text x="727" y="254" text-anchor="middle" class="seq-text seq-mono" fill="#d29922">waitForIdle() + onClose()</text>
+
+  <!-- 7. Tool → Parent: return accepted -->
+  <line x1="290" y1="295" x2="110" y2="295" stroke="#3fb950" stroke-width="1.5" marker-end="url(#seq-arrow-green)"/>
+  <text x="200" y="289" text-anchor="middle" class="seq-text seq-mono" fill="#3fb950">{ status: "accepted", runId }</text>
+
+  <!-- Async boundary -->
+  <line x1="20" y1="330" x2="900" y2="330" stroke="#30363d" stroke-width="1" stroke-dasharray="3 3"/>
+  <rect x="390" y="320" width="140" height="20" rx="4" fill="#161b22" stroke="#30363d"/>
+  <text x="460" y="335" text-anchor="middle" class="seq-text" fill="#8b949e" style="font-size:11px">async (non-blocking)</text>
+
+  <!-- 8. Child processes task -->
+  <rect x="790" y="355" width="60" height="60" rx="4" fill="rgba(57,210,192,0.1)" stroke="#39d2c0" stroke-dasharray="4 2"/>
+  <text x="820" y="380" text-anchor="middle" class="seq-text" fill="#39d2c0" style="font-size:10px">LLM</text>
+  <text x="820" y="395" text-anchor="middle" class="seq-text" fill="#39d2c0" style="font-size:10px">inference</text>
+
+  <!-- 9. Child → Registry: waitForIdle resolves -->
+  <line x1="815" y1="440" x2="645" y2="440" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="6 3" marker-end="url(#seq-arrow-green)"/>
+  <text x="730" y="434" text-anchor="middle" class="seq-text seq-mono" fill="#3fb950">idle (resolved)</text>
+
+  <!-- 10. Registry: handleRunCompletion -->
+  <rect x="610" y="460" width="60" height="30" rx="4" fill="rgba(210,153,34,0.1)" stroke="#d29922" stroke-dasharray="4 2"/>
+  <text x="640" y="480" text-anchor="middle" class="seq-text" fill="#d29922" style="font-size:10px">announce</text>
+
+  <!-- 11. Registry → Parent: announcement -->
+  <line x1="635" y1="510" x2="110" y2="510" stroke="#3fb950" stroke-width="1.5" marker-end="url(#seq-arrow-green)"/>
+  <text x="372" y="504" text-anchor="middle" class="seq-text seq-mono" fill="#3fb950">parentAgent.write(announcement)</text>
+
+  <!-- 12. Registry: cleanup -->
+  <line x1="640" y1="545" x2="815" y2="545" stroke="#f85149" stroke-width="1.5" marker-end="url(#seq-arrow-red)"/>
+  <text x="727" y="539" text-anchor="middle" class="seq-text seq-mono" fill="#f85149">deleteChildSession()</text>
+
+  <!-- 13. Registry: schedule archive -->
+  <rect x="610" y="565" width="60" height="25" rx="4" fill="rgba(210,153,34,0.1)" stroke="#d29922" stroke-dasharray="4 2"/>
+  <text x="640" y="582" text-anchor="middle" class="seq-text" fill="#d29922" style="font-size:9px">archive 60m</text>
+
+  <!-- Arrow markers -->
+  <defs>
+    <marker id="seq-arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff"/>
+    </marker>
+    <marker id="seq-arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3fb950"/>
+    </marker>
+    <marker id="seq-arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#bc8cff"/>
+    </marker>
+    <marker id="seq-arrow-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d29922"/>
+    </marker>
+    <marker id="seq-arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#39d2c0"/>
+    </marker>
+    <marker id="seq-arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f85149"/>
+    </marker>
+  </defs>
+</svg>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2>Run State Machine</h2>
+<!-- ══════════════════════════════════════════════════════ -->
+
+<div class="state-diagram" style="flex-wrap: wrap; gap: 12px;">
+  <div class="state-node" style="background:rgba(88,166,255,0.12); border:1px solid var(--accent);">
+    <svg width="10" height="10"><circle cx="5" cy="5" r="5" fill="#58a6ff"/></svg>
+    created
+  </div>
+  <div class="state-arrow">
+    <svg width="24" height="12">
+      <defs>
+        <marker id="sm-arrow-1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M0 0 L10 5 L0 10z" fill="#8b949e"/>
+        </marker>
+      </defs>
+      <path d="M0 6 L20 6" stroke="#8b949e" stroke-width="1.5" marker-end="url(#sm-arrow-1)"/>
+    </svg>
+    startedAt
+  </div>
+  <div class="state-node" style="background:rgba(188,140,255,0.12); border:1px solid var(--purple);">
+    <svg width="10" height="10"><circle cx="5" cy="5" r="5" fill="#bc8cff"/></svg>
+    started
+  </div>
+  <div class="state-arrow">
+    <svg width="24" height="12">
+      <defs>
+        <marker id="sm-arrow-2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M0 0 L10 5 L0 10z" fill="#8b949e"/>
+        </marker>
+      </defs>
+      <path d="M0 6 L20 6" stroke="#8b949e" stroke-width="1.5" marker-end="url(#sm-arrow-2)"/>
+    </svg>
+    endedAt
+  </div>
+  <div class="state-node" style="background:rgba(63,185,80,0.12); border:1px solid var(--green);">
+    <svg width="10" height="10"><circle cx="5" cy="5" r="5" fill="#3fb950"/></svg>
+    ended
+  </div>
+  <div class="state-arrow">
+    <svg width="24" height="12">
+      <defs>
+        <marker id="sm-arrow-3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M0 0 L10 5 L0 10z" fill="#8b949e"/>
+        </marker>
+      </defs>
+      <path d="M0 6 L20 6" stroke="#8b949e" stroke-width="1.5" marker-end="url(#sm-arrow-3)"/>
+    </svg>
+    announce
+  </div>
+  <div class="state-node" style="background:rgba(210,153,34,0.12); border:1px solid var(--orange);">
+    <svg width="10" height="10"><circle cx="5" cy="5" r="5" fill="#d29922"/></svg>
+    cleanup done
+  </div>
+  <div class="state-arrow">
+    <svg width="24" height="12">
+      <defs>
+        <marker id="sm-arrow-4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M0 0 L10 5 L0 10z" fill="#8b949e"/>
+        </marker>
+      </defs>
+      <path d="M0 6 L20 6" stroke="#8b949e" stroke-width="1.5" marker-end="url(#sm-arrow-4)"/>
+    </svg>
+    60 min
+  </div>
+  <div class="state-node" style="background:rgba(139,148,158,0.12); border:1px solid var(--text-muted);">
+    <svg width="10" height="10"><circle cx="5" cy="5" r="5" fill="#8b949e"/></svg>
+    archived
+  </div>
+</div>
+
+<div style="margin-top: 20px; padding: 16px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;">
+  <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Outcome Status Values</div>
+  <div style="display: flex; gap: 24px; flex-wrap: wrap; font-size: 12px;">
+    <span><code style="color:var(--green)">ok</code> &mdash; Task completed normally (waitForIdle resolved)</span>
+    <span><code style="color:var(--red)">error</code> &mdash; Child agent threw an error</span>
+    <span><code style="color:var(--orange)">timeout</code> &mdash; Exceeded timeoutSeconds limit</span>
+    <span><code style="color:var(--text-muted)">unknown</code> &mdash; Process crash or Hub shutdown</span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2>Module Map</h2>
+<!-- ══════════════════════════════════════════════════════ -->
+
+<div class="module-grid">
+  <div class="module-card" style="border-left: 3px solid var(--cyan);">
+    <div class="mod-name">src/agent/subagent/types.ts</div>
+    <div class="mod-desc">Core type definitions</div>
+    <div class="mod-exports">
+      <span>export</span> SubagentRunOutcome<br>
+      <span>export</span> SubagentRunRecord<br>
+      <span>export</span> RegisterSubagentRunParams<br>
+      <span>export</span> SubagentAnnounceParams<br>
+      <span>export</span> SubagentSystemPromptParams
+    </div>
+  </div>
+
+  <div class="module-card" style="border-left: 3px solid var(--orange);">
+    <div class="mod-name">src/agent/subagent/registry.ts</div>
+    <div class="mod-desc">In-memory registry + lifecycle watcher</div>
+    <div class="mod-exports">
+      <span>export</span> initSubagentRegistry()<br>
+      <span>export</span> registerSubagentRun()<br>
+      <span>export</span> listSubagentRuns()<br>
+      <span>export</span> releaseSubagentRun()<br>
+      <span>export</span> getSubagentRun()<br>
+      <span>export</span> shutdownSubagentRegistry()
+    </div>
+  </div>
+
+  <div class="module-card" style="border-left: 3px solid var(--text-muted);">
+    <div class="mod-name">src/agent/subagent/registry-store.ts</div>
+    <div class="mod-desc">JSON file persistence</div>
+    <div class="mod-exports">
+      <span>export</span> loadSubagentRuns()<br>
+      <span>export</span> saveSubagentRuns()<br>
+      <span>export</span> getSubagentStorePath()
+    </div>
+  </div>
+
+  <div class="module-card" style="border-left: 3px solid var(--green);">
+    <div class="mod-name">src/agent/subagent/announce.ts</div>
+    <div class="mod-desc">Result propagation child &rarr; parent</div>
+    <div class="mod-exports">
+      <span>export</span> buildSubagentSystemPrompt()<br>
+      <span>export</span> readLatestAssistantReply()<br>
+      <span>export</span> formatAnnouncementMessage()<br>
+      <span>export</span> runSubagentAnnounceFlow()
+    </div>
+  </div>
+
+  <div class="module-card" style="border-left: 3px solid var(--accent);">
+    <div class="mod-name">src/agent/tools/sessions-spawn.ts</div>
+    <div class="mod-desc">Tool definition for parent agents</div>
+    <div class="mod-exports">
+      <span>export</span> createSessionsSpawnTool()<br>
+      schema: { task, label?, model?,<br>
+      &nbsp;&nbsp;cleanup?, timeoutSeconds? }
+    </div>
+  </div>
+
+  <div class="module-card" style="border-left: 3px solid var(--purple);">
+    <div class="mod-name">src/hub/hub-singleton.ts</div>
+    <div class="mod-desc">Global Hub access for tools &amp; registry</div>
+    <div class="mod-exports">
+      <span>export</span> setHub(hub)<br>
+      <span>export</span> getHub()<br>
+      <span>export</span> isHubInitialized()
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2>Key Design Decisions</h2>
+<!-- ══════════════════════════════════════════════════════ -->
+
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 16px;">
+  <div class="module-card">
+    <div class="mod-name" style="color: var(--accent); font-family: inherit;">waitForIdle() vs stream consumption</div>
+    <div class="mod-desc" style="font-size: 13px; margin-top: 8px;">
+      Channel is single-reader. <code>Hub.consumeAgent()</code> already reads the stream for forwarding events.
+      Registry uses <code>waitForIdle()</code> (promise on internal task queue) to detect completion without competing for the stream.
+    </div>
+  </div>
+  <div class="module-card">
+    <div class="mod-name" style="color: var(--accent); font-family: inherit;">Singleton Hub access</div>
+    <div class="mod-desc" style="font-size: 13px; margin-top: 8px;">
+      Tools and registry modules cannot receive Hub via constructor injection (tools are created before Hub exists).
+      A module-level singleton (<code>setHub</code>/<code>getHub</code>) bridges this gap, with <code>isHubInitialized()</code> guard for test safety.
+    </div>
+  </div>
+  <div class="module-card">
+    <div class="mod-name" style="color: var(--accent); font-family: inherit;">Crash recovery</div>
+    <div class="mod-desc" style="font-size: 13px; margin-top: 8px;">
+      Runs are persisted to JSON after every state change. On restart, <code>initSubagentRegistry()</code>
+      loads persisted runs: completed-but-unannounced runs trigger announce flow; unfinished runs are marked as
+      <code>status: "unknown"</code>.
+    </div>
+  </div>
+  <div class="module-card">
+    <div class="mod-name" style="color: var(--accent); font-family: inherit;">Subagent isolation</div>
+    <div class="mod-desc" style="font-size: 13px; margin-top: 8px;">
+      Child agents have <code>isSubagent: true</code> which applies tool deny-list (blocks <code>sessions_spawn</code>).
+      System prompt explicitly forbids nested spawning, direct user communication, and off-topic work.
+      Sessions are ephemeral &mdash; deleted after announce unless <code>cleanup: "keep"</code>.
+    </div>
+  </div>
+</div>
+
+<div style="text-align: center; color: var(--text-muted); font-size: 12px; margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border);">
+  Super Multica &mdash; Subagent Orchestration System &mdash; Branch: subagent-orchestration
+</div>
+
+</div>
+</body>
+</html>

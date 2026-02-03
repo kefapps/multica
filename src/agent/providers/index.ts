@@ -28,6 +28,8 @@ export {
   type ProviderConfig,
   resolveProviderConfig,
   resolveApiKey,
+  resolveApiKeyForProfile,
+  resolveApiKeyForProvider,
   resolveBaseUrl,
   resolveModelId,
   resolveModel,

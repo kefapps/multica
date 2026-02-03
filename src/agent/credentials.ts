@@ -21,6 +21,8 @@ export type CredentialsConfig = {
   llm?: {
     provider?: string | undefined;
     providers?: Record<string, ProviderConfig> | undefined;
+    /** Explicit profile ordering per provider (e.g. { anthropic: ["anthropic", "anthropic:backup"] }) */
+    order?: Record<string, string[]> | undefined;
   } | undefined;
   tools?: Record<string, ToolConfig> | undefined;
 };
@@ -183,6 +185,30 @@ export class CredentialManager {
       return true;
     }
     return name in process.env;
+  }
+
+  /**
+   * Get explicit profile order for a provider from credentials.json5 `llm.order`.
+   * Returns undefined if no explicit order is configured.
+   */
+  getLlmOrder(provider: string): string[] | undefined {
+    this.loadCore();
+    return this.coreConfig?.llm?.order?.[provider];
+  }
+
+  /**
+   * List all profile IDs from `llm.providers` that belong to a given provider.
+   * A profile matches if its key equals the provider exactly or starts with "provider:".
+   */
+  listProfileIdsForProvider(provider: string): string[] {
+    this.loadCore();
+    const providers = this.coreConfig?.llm?.providers;
+    if (!providers) return [];
+
+    const prefix = `${provider}:`;
+    return Object.keys(providers).filter(
+      (key) => key === provider || key.startsWith(prefix),
+    );
   }
 
   getResolvedEnvSnapshot(): Record<string, string> {

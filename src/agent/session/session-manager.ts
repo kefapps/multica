@@ -1,9 +1,11 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { getModel, type Model } from "@mariozechner/pi-ai";
 import type { SessionEntry, SessionMeta } from "./types.js";
-import { appendEntry, readEntries, writeEntries } from "./storage.js";
+import { appendEntry, readEntries, resolveSessionPath, writeEntries } from "./storage.js";
 import { compactMessages, compactMessagesAsync } from "./compaction.js";
 import { credentialManager } from "../credentials.js";
+import { repairSessionFileIfNeeded, type RepairReport } from "./session-file-repair.js";
+import { sanitizeToolCallInputs, sanitizeToolUseResultPairing } from "./session-transcript-repair.js";
 
 /** Get Kimi model for summarization (use a cheaper model than k2-thinking) */
 function getSummaryModel(): Model<any> {
@@ -140,11 +142,19 @@ export class SessionManager {
     return readEntries(this.sessionId, { baseDir: this.baseDir });
   }
 
+  async repairIfNeeded(warn?: (message: string) => void): Promise<RepairReport> {
+    const filePath = resolveSessionPath(this.sessionId, { baseDir: this.baseDir });
+    return repairSessionFileIfNeeded({ sessionFile: filePath, warn });
+  }
+
   loadMessages(): AgentMessage[] {
     const entries = this.loadEntries();
-    return entries
+    let messages = entries
       .filter((entry) => entry.type === "message")
       .map((entry) => entry.message);
+    messages = sanitizeToolCallInputs(messages);
+    messages = sanitizeToolUseResultPairing(messages);
+    return messages;
   }
 
   loadMeta(): SessionMeta | undefined {

@@ -18,6 +18,12 @@ import {
   isOAuthProvider,
 } from "./registry.js";
 import type { AgentOptions } from "../types.js";
+import {
+  loadAuthProfileStore,
+  resolveAuthProfileOrder,
+  isProfileInCooldown,
+} from "../auth-profiles/index.js";
+import type { ResolvedProfileAuth } from "../auth-profiles/index.js";
 
 // ============================================================
 // Types
@@ -126,6 +132,71 @@ export function resolveBaseUrl(provider: string, explicitUrl?: string): string |
 export function resolveModelId(provider: string, explicitModel?: string): string | undefined {
   if (explicitModel) return explicitModel;
   return credentialManager.getLlmProviderConfig(provider)?.model ?? getDefaultModel(provider);
+}
+
+// ============================================================
+// Profile-aware API Key Resolution
+// ============================================================
+
+/**
+ * Resolve API key for a specific auth profile ID.
+ * Profile IDs follow the convention: "provider" or "provider:label".
+ */
+export function resolveApiKeyForProfile(profileId: string): string | undefined {
+  const config = credentialManager.getLlmProviderConfig(profileId);
+  return config?.apiKey;
+}
+
+/**
+ * Resolve API key by iterating auth profiles for a provider.
+ * Returns the first available (non-cooldown) profile with a valid key.
+ * Falls back to the legacy single-key resolution if no profiles are configured.
+ */
+export function resolveApiKeyForProvider(
+  provider: string,
+  explicitKey?: string,
+): ResolvedProfileAuth | undefined {
+  if (explicitKey) {
+    return { apiKey: explicitKey, profileId: provider, provider };
+  }
+
+  // Try OAuth providers first
+  const providerConfig = resolveProviderConfig(provider);
+  if (providerConfig?.apiKey || providerConfig?.accessToken) {
+    const key = providerConfig.apiKey ?? providerConfig.accessToken;
+    if (key) return { apiKey: key, profileId: provider, provider };
+  }
+
+  // Try auth profiles (multi-key rotation)
+  const store = loadAuthProfileStore();
+  const candidates = resolveAuthProfileOrder(provider, store);
+
+  if (candidates.length > 0) {
+    for (const profileId of candidates) {
+      const stats = store.usageStats?.[profileId];
+      if (stats && isProfileInCooldown(stats)) continue;
+
+      const apiKey = resolveApiKeyForProfile(profileId);
+      if (apiKey) {
+        return { apiKey, profileId, provider };
+      }
+    }
+    // All in cooldown — return the first one (will be retried when cooldown expires)
+    for (const profileId of candidates) {
+      const apiKey = resolveApiKeyForProfile(profileId);
+      if (apiKey) {
+        return { apiKey, profileId, provider };
+      }
+    }
+  }
+
+  // Fall back to single-key credentials.json5
+  const fallbackKey = credentialManager.getLlmProviderConfig(provider)?.apiKey;
+  if (fallbackKey) {
+    return { apiKey: fallbackKey, profileId: provider, provider };
+  }
+
+  return undefined;
 }
 
 // ============================================================

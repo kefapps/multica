@@ -21,6 +21,8 @@ export type AgentOptions = {
   model?: string | undefined;
   /** Custom API key (overrides environment variable) */
   apiKey?: string | undefined;
+  /** Pin a specific auth profile ID (e.g. "anthropic:backup"). Disables rotation. */
+  authProfileId?: string | undefined;
   /** Custom base URL for the provider endpoint */
   baseUrl?: string | undefined;
   /** System prompt, if profileId is set will auto-construct from profile */

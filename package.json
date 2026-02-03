@@ -42,11 +42,11 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "@multica/sdk": "workspace:*",
     "@mariozechner/pi-agent-core": "^0.50.3",
     "@mariozechner/pi-ai": "^0.50.3",
     "@mariozechner/pi-coding-agent": "^0.50.3",
     "@mozilla/readability": "^0.6.0",
+    "@multica/sdk": "workspace:*",
     "@nestjs/common": "^11.1.12",
     "@nestjs/core": "^11.1.12",
     "@nestjs/platform-express": "^11.1.12",

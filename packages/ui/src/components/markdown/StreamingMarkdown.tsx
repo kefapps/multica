@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { Markdown, type RenderMode } from './Markdown'
+import { Spinner } from '@multica/ui/components/spinner'
 
 export interface StreamingMarkdownProps {
   content: string
@@ -162,6 +163,17 @@ export function StreamingMarkdown({
     )
   }
 
+  const indicator = (
+    <div className="flex items-center gap-2 py-1 text-muted-foreground">
+      <Spinner className="text-xs" />
+      <span className="text-xs">Generating...</span>
+    </div>
+  )
+
+  if (blocks.length === 0) {
+    return indicator
+  }
+
   return (
     <>
       {blocks.map((block, i) => {
@@ -169,7 +181,7 @@ export function StreamingMarkdown({
 
         // Complete blocks use content hash as key -> stable identity -> memoized
         // Last block uses "active" prefix -> always re-renders on content change
-        const key = isLastBlock ? `active-${i}` : `block-${simpleHash(block.content)}`
+        const key = isLastBlock ? `active-${i}` : `block-${i}-${simpleHash(block.content)}`
 
         return (
           <MemoizedBlock
@@ -181,6 +193,7 @@ export function StreamingMarkdown({
           />
         )
       })}
+      {indicator}
     </>
   )
 }
