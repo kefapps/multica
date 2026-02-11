@@ -1,5 +1,12 @@
 import { cn } from "@multica/ui/lib/utils";
 
+interface MulticaIconProps extends React.ComponentProps<"span"> {
+  /**
+   * If true, play a one-time entrance spin animation (2 seconds).
+   */
+  animate?: boolean;
+}
+
 /**
  * Pure CSS 8-pointed asterisk icon matching the Multica logo.
  * Uses currentColor so it adapts to light/dark themes automatically.
@@ -7,11 +14,16 @@ import { cn } from "@multica/ui/lib/utils";
  */
 export function MulticaIcon({
   className,
+  animate = false,
   ...props
-}: React.ComponentProps<"span">) {
+}: MulticaIconProps) {
   return (
     <span
-      className={cn("inline-block size-[1em] hover:animate-spin", className)}
+      className={cn(
+        "inline-block size-[1em] hover:animate-spin",
+        animate && "animate-welcome-spin",
+        className
+      )}
       aria-hidden="true"
       {...props}
     >

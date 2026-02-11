@@ -1,13 +1,12 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { Button } from '@multica/ui/components/ui/button'
 import { Input } from '@multica/ui/components/ui/input'
 import { Badge } from '@multica/ui/components/ui/badge'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { ArrowLeft02Icon, Loading03Icon } from '@hugeicons/core-free-icons'
-import { useChannels } from '../../hooks/use-channels'
-import { TutorialStep } from '../../components/onboarding/tutorial-step'
-import { useOnboardingStore } from '../../stores/onboarding'
+import { useChannels } from '../../../hooks/use-channels'
+import { TutorialStep } from '../../../components/onboarding/tutorial-step'
+import { useOnboardingStore } from '../../../stores/onboarding'
 
 function statusVariant(
   status: string
@@ -24,8 +23,12 @@ function statusVariant(
   }
 }
 
-export default function ConnectStep() {
-  const navigate = useNavigate()
+interface ConnectStepProps {
+  onNext: () => void
+  onBack: () => void
+}
+
+export default function ConnectStep({ onNext, onBack }: ConnectStepProps) {
   const { states, config, saveToken, loading: channelLoading } = useChannels()
   const { setClientConnected } = useOnboardingStore()
 
@@ -57,16 +60,13 @@ export default function ConnectStep() {
     setSaving(false)
   }
 
-  const handleContinue = () => navigate('/onboarding/try-it')
-  const handleBack = () => navigate('/onboarding/setup')
-
   return (
     <div className="h-full flex">
       {/* Left column */}
       <div className="flex-1 flex items-center justify-center px-12 py-8">
         <div className="max-w-md w-full space-y-6">
           <button
-            onClick={handleBack}
+            onClick={onBack}
             className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
           >
             <HugeiconsIcon icon={ArrowLeft02Icon} className="size-4" />
@@ -139,11 +139,11 @@ export default function ConnectStep() {
 
           <div className="flex justify-end gap-2">
             {!hasToken && (
-              <Button size="lg" variant="ghost" onClick={handleContinue}>
+              <Button size="lg" variant="ghost" onClick={onNext}>
                 Skip
               </Button>
             )}
-            <Button size="lg" onClick={handleContinue} disabled={!isRunning}>
+            <Button size="lg" onClick={onNext} disabled={!isRunning}>
               Continue
             </Button>
           </div>

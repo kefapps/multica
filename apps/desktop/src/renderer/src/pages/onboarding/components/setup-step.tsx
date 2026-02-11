@@ -1,17 +1,20 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { Button } from '@multica/ui/components/ui/button'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { ArrowLeft02Icon } from '@hugeicons/core-free-icons'
-import { useProvider } from '../../hooks/use-provider'
-import { ApiKeyDialog } from '../../components/api-key-dialog'
-import { OAuthDialog } from '../../components/oauth-dialog'
-import { ProviderSetup } from '../../components/onboarding/provider-setup'
-import { TutorialStep } from '../../components/onboarding/tutorial-step'
-import { useOnboardingStore } from '../../stores/onboarding'
+import { useProvider } from '../../../hooks/use-provider'
+import { ApiKeyDialog } from '../../../components/api-key-dialog'
+import { OAuthDialog } from '../../../components/oauth-dialog'
+import { ProviderSetup } from '../../../components/onboarding/provider-setup'
+import { TutorialStep } from '../../../components/onboarding/tutorial-step'
+import { useOnboardingStore } from '../../../stores/onboarding'
 
-export default function SetupStep() {
-  const navigate = useNavigate()
+interface SetupStepProps {
+  onNext: () => void
+  onBack: () => void
+}
+
+export default function SetupStep({ onNext, onBack }: SetupStepProps) {
   const { providers, current, loading, error, refresh, setProvider } =
     useProvider()
   const { setProviderConfigured } = useOnboardingStore()
@@ -47,21 +50,13 @@ export default function SetupStep() {
     setProviderConfigured(true)
   }
 
-  const handleContinue = () => {
-    navigate('/onboarding/connect')
-  }
-
-  const handleBack = () => {
-    navigate('/onboarding')
-  }
-
   return (
     <div className="h-full flex">
       {/* Left column — main content, centered both axes */}
       <div className="flex-1 flex items-center justify-center px-12 py-8">
         <div className="max-w-md w-full space-y-6">
           <button
-            onClick={handleBack}
+            onClick={onBack}
             className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
           >
             <HugeiconsIcon icon={ArrowLeft02Icon} className="size-4" />
@@ -94,7 +89,7 @@ export default function SetupStep() {
           <div className="flex justify-end">
             <Button
               size="lg"
-              onClick={handleContinue}
+              onClick={onNext}
               disabled={!hasActiveProvider}
             >
               Continue

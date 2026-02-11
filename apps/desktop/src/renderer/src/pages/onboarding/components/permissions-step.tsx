@@ -1,4 +1,3 @@
-import { useNavigate } from 'react-router-dom'
 import { Button } from '@multica/ui/components/ui/button'
 import {
   FolderOpenIcon,
@@ -6,9 +5,9 @@ import {
   AiBrainIcon,
   Database01Icon,
 } from '@hugeicons/core-free-icons'
-import { AcknowledgementItem } from '../../components/onboarding/permission-item'
-import { PrivacyPanel } from '../../components/onboarding/privacy-panel'
-import { useOnboardingStore } from '../../stores/onboarding'
+import { AcknowledgementItem } from '../../../components/onboarding/permission-item'
+import { PrivacyPanel } from '../../../components/onboarding/privacy-panel'
+import { useOnboardingStore } from '../../../stores/onboarding'
 
 const acknowledgementItems = [
   {
@@ -41,14 +40,13 @@ const acknowledgementItems = [
   },
 ]
 
-export default function PermissionsStep() {
-  const navigate = useNavigate()
+interface PermissionsStepProps {
+  onNext: () => void
+}
+
+export default function PermissionsStep({ onNext }: PermissionsStepProps) {
   const { acknowledgements, allAcknowledged, setAcknowledgement } =
     useOnboardingStore()
-
-  const handleContinue = () => {
-    navigate('/onboarding/setup')
-  }
 
   return (
     <div className="h-full flex">
@@ -83,7 +81,7 @@ export default function PermissionsStep() {
           <div className="flex justify-end">
             <Button
               size="lg"
-              onClick={handleContinue}
+              onClick={onNext}
               disabled={!allAcknowledged}
             >
               Continue

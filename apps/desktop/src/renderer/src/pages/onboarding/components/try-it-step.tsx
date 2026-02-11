@@ -1,12 +1,10 @@
-import { useNavigate } from 'react-router-dom'
 import { Button } from '@multica/ui/components/ui/button'
 import { Loading } from '@multica/ui/components/ui/loading'
 import { ChatView } from '@multica/ui/components/chat-view'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { ArrowLeft02Icon } from '@hugeicons/core-free-icons'
-import { SamplePrompt } from '../../components/onboarding/sample-prompt'
-import { useOnboardingStore } from '../../stores/onboarding'
-import { useLocalChat } from '../../hooks/use-local-chat'
+import { SamplePrompt } from '../../../components/onboarding/sample-prompt'
+import { useLocalChat } from '../../../hooks/use-local-chat'
 
 const samplePrompts = [
   {
@@ -26,9 +24,12 @@ const samplePrompts = [
   },
 ]
 
-export default function TryItStep() {
-  const navigate = useNavigate()
-  const { completeOnboarding } = useOnboardingStore()
+interface TryItStepProps {
+  onComplete: () => void
+  onBack: () => void
+}
+
+export default function TryItStep({ onComplete, onBack }: TryItStepProps) {
   const {
     agentId,
     initError,
@@ -45,22 +46,13 @@ export default function TryItStep() {
     resolveApproval,
   } = useLocalChat()
 
-  const handleComplete = () => {
-    completeOnboarding()
-    navigate('/')
-  }
-
-  const handleBack = () => {
-    navigate('/onboarding/connect')
-  }
-
   return (
     <div className="h-full flex">
       {/* Left column — prompts */}
       <div className="flex-1 flex items-center justify-center px-12 py-8">
         <div className="max-w-md w-full space-y-6">
           <button
-            onClick={handleBack}
+            onClick={onBack}
             className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
           >
             <HugeiconsIcon icon={ArrowLeft02Icon} className="size-4" />
@@ -89,7 +81,7 @@ export default function TryItStep() {
           </div>
 
           <div className="flex justify-end">
-            <Button size="lg" onClick={handleComplete}>
+            <Button size="lg" onClick={onComplete}>
               Open Multica
             </Button>
           </div>
