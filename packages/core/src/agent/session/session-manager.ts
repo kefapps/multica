@@ -171,14 +171,14 @@ export class SessionManager {
     return this.loadMessagesFromEntries(options, false);
   }
 
-  loadMessagesForDisplay(options?: { includeInternal?: boolean }): AgentMessage[] {
+  loadMessagesForDisplay(options?: { includeInternal?: boolean }): (AgentMessage & { source?: import("./types.js").MessageSource })[] {
     return this.loadMessagesFromEntries(options, true);
   }
 
   private loadMessagesFromEntries(
     options: { includeInternal?: boolean } | undefined,
     preferDisplayContent: boolean,
-  ): AgentMessage[] {
+  ): (AgentMessage & { source?: import("./types.js").MessageSource })[] {
     const entries = this.loadEntries();
     let messages = entries
       .filter((entry) => {
@@ -188,17 +188,19 @@ export class SessionManager {
       })
       .map((entry) => {
         const messageEntry = entry as Extract<SessionEntry, { type: "message" }>;
-        if (
-          preferDisplayContent
+        const base = preferDisplayContent
           && messageEntry.message.role === "user"
           && messageEntry.displayContent !== undefined
-        ) {
-          return { ...messageEntry.message, content: messageEntry.displayContent };
+          ? { ...messageEntry.message, content: messageEntry.displayContent }
+          : messageEntry.message;
+        // Include source for user messages
+        if (messageEntry.source && messageEntry.message.role === "user") {
+          return { ...base, source: messageEntry.source };
         }
-        return messageEntry.message;
+        return base;
       });
-    messages = sanitizeToolCallInputs(messages);
-    messages = sanitizeToolUseResultPairing(messages);
+    messages = sanitizeToolCallInputs(messages) as typeof messages;
+    messages = sanitizeToolUseResultPairing(messages) as typeof messages;
     return messages;
   }
 
@@ -230,7 +232,7 @@ export class SessionManager {
 
   saveMessage(
     message: AgentMessage,
-    options?: { internal?: boolean; displayContent?: UserMessage["content"] },
+    options?: { internal?: boolean; displayContent?: UserMessage["content"]; source?: import("./types.js").MessageSource },
   ) {
     void this.enqueue(() =>
       appendEntry(
@@ -243,6 +245,7 @@ export class SessionManager {
           ...(options?.displayContent !== undefined
             ? { displayContent: options.displayContent }
             : {}),
+          ...(options?.source !== undefined ? { source: options.source } : {}),
         },
         { baseDir: this.baseDir },
       ),

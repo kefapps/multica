@@ -51,6 +51,22 @@ import {
 import { enqueueSystemEvent } from "../heartbeat/system-events.js";
 import { isHeartbeatAckEvent } from "./heartbeat-filter.js";
 
+// ============ Message Source Types ============
+
+/** Message source: where did this inbound message come from? */
+export type MessageSource =
+  | { type: "local" }
+  | { type: "gateway"; deviceId: string }
+  | { type: "channel"; channelId: string; accountId: string; conversationId: string };
+
+/** Inbound message event broadcast to all listeners */
+export interface InboundMessageEvent {
+  agentId: string;
+  content: string;
+  source: MessageSource;
+  timestamp: number;
+}
+
 export class Hub {
   private readonly agents = new Map<string, AsyncAgent>();
   private readonly agentSenders = new Map<string, string>();
@@ -59,6 +75,7 @@ export class Hub {
   private readonly pendingAssistantStarts = new Map<string, { agentId: string; event: unknown }>();
   private readonly suppressedStreamAgents = new Set<string>();
   private readonly localApprovalHandlers = new Map<string, (payload: ExecApprovalRequest) => void>();
+  private readonly inboundListeners = new Set<(event: InboundMessageEvent) => void>();
   private readonly rpc: RpcDispatcher;
   private readonly approvalManager: ExecApprovalManager;
   private readonly heartbeatListeners = new Set<(event: HeartbeatEventPayload) => void>();
@@ -268,7 +285,14 @@ export class Hub {
       if (agent && !agent.closed) {
         this.agentSenders.set(agentId, msg.from);
         this.channelManager.clearLastRoute();
-        agent.write(content);
+        const source: MessageSource = { type: "gateway", deviceId: msg.from };
+        this.broadcastInbound({
+          agentId,
+          content,
+          source,
+          timestamp: Date.now(),
+        });
+        agent.write(content, { source });
       } else {
         console.warn(`[Hub] Agent not found or closed: ${agentId}`);
       }
@@ -293,6 +317,21 @@ export class Hub {
       const idx = this._stateChangeListeners.indexOf(callback);
       if (idx >= 0) this._stateChangeListeners.splice(idx, 1);
     };
+  }
+
+  /** Subscribe to inbound messages from all sources. Returns unsubscribe function. */
+  onInboundMessage(callback: (event: InboundMessageEvent) => void): () => void {
+    this.inboundListeners.add(callback);
+    return () => {
+      this.inboundListeners.delete(callback);
+    };
+  }
+
+  /** Broadcast an inbound message to all listeners */
+  broadcastInbound(event: InboundMessageEvent): void {
+    for (const listener of this.inboundListeners) {
+      listener(event);
+    }
   }
 
   /** Register a one-time token for device verification (called when QR code is generated) */

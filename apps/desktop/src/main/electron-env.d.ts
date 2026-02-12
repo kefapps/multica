@@ -149,6 +149,18 @@ interface ChannelAccountStateInfo {
   error?: string
 }
 
+type MessageSource =
+  | { type: 'local' }
+  | { type: 'gateway'; deviceId: string }
+  | { type: 'channel'; channelId: string; accountId: string; conversationId: string }
+
+interface InboundMessageEvent {
+  agentId: string
+  content: string
+  source: MessageSource
+  timestamp: number
+}
+
 interface ElectronAPI {
   app: {
     getFlags: () => Promise<{ forceOnboarding: boolean }>
@@ -178,6 +190,8 @@ interface ElectronAPI {
     offConnectionStateChanged: () => void
     onDevicesChanged: (callback: () => void) => void
     offDevicesChanged: () => void
+    onInboundMessage: (callback: (event: InboundMessageEvent) => void) => void
+    offInboundMessage: () => void
   }
   tools: {
     list: () => Promise<ToolInfo[]>

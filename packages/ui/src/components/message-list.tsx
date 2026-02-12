@@ -6,6 +6,7 @@ import { StreamingMarkdown } from "@multica/ui/components/markdown/StreamingMark
 import { ToolCallItem } from "@multica/ui/components/tool-call-item";
 import { ThinkingItem } from "@multica/ui/components/thinking-item";
 import { CompactionItem } from "@multica/ui/components/compaction-item";
+import { MessageSourceIcon } from "@multica/ui/components/message-source-icon";
 import { cn, getTextContent } from "@multica/ui/lib/utils";
 import type { Message } from "@multica/store";
 import type { ContentBlock, ToolCall, ThinkingContent } from "@multica/sdk";
@@ -114,10 +115,14 @@ export const MessageList = memo(function MessageList({ messages, streamingIds }:
             {(text || isStreaming) && (
               <div
                 className={cn(
-                  "flex",
+                  "flex items-center gap-1.5",
                   msg.role === "user" ? "justify-end" : "justify-start"
                 )}
               >
+                {/* Source icon for non-local user messages */}
+                {msg.role === "user" && msg.source && msg.source.type !== "local" && (
+                  <MessageSourceIcon source={msg.source} />
+                )}
                 <div
                   className={cn(
                     msg.role === "user" ? "bg-muted rounded-md max-w-[60%] py-1 px-2.5 my-2" : "w-full py-1 px-2.5 my-1"

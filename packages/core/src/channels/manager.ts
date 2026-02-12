@@ -461,12 +461,25 @@ export class ChannelManager {
           const route = this.lastRoute ? { ...this.lastRoute } : null;
           const acks = [...this.ackBuffer];
           this.ackBuffer = [];
+          const source = route ? {
+            type: "channel" as const,
+            channelId: route.plugin.id,
+            accountId: route.deliveryCtx.accountId,
+            conversationId: route.deliveryCtx.conversationId,
+          } : undefined;
           if (route) {
             this.pendingRoutes.push({ route, acks });
+            // Broadcast inbound message to local listeners (Desktop UI)
+            this.hub.broadcastInbound({
+              agentId: agent.sessionId,
+              content: combinedText,
+              source: source!,
+              timestamp: Date.now(),
+            });
           }
           const replyTo = route?.deliveryCtx.replyToMessageId ?? "?";
           console.log(`[Channels] Debouncer flushing ${combinedText.length} chars to agent (queued route replyTo=${replyTo}, acks=${acks.length})`);
-          agent.write(combinedText);
+          agent.write(combinedText, { source });
         },
       );
     }

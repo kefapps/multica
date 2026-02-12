@@ -391,7 +391,15 @@ export function registerHubIpcHandlers(): void {
     }
 
     h.channelManager.clearLastRoute()
-    agent.write(content)
+    const source = { type: 'local' as const }
+    // Broadcast as local source (for consistency, though UI already knows)
+    h.broadcastInbound({
+      agentId,
+      content,
+      source,
+      timestamp: Date.now(),
+    })
+    agent.write(content, { source })
     safeLog(`[IPC] Local chat message sent to agent: ${agentId}`)
     return { ok: true }
   })
@@ -496,6 +504,13 @@ export function setupDeviceConfirmation(mainWindow: Electron.BrowserWindow): voi
   h.onConnectionStateChange((state) => {
     if (!mainWindow.isDestroyed()) {
       mainWindow.webContents.send('hub:connection-state-changed', state)
+    }
+  })
+
+  // Forward inbound messages from all sources (gateway, channel) to renderer
+  h.onInboundMessage((event) => {
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('hub:inbound-message', event)
     }
   })
 }

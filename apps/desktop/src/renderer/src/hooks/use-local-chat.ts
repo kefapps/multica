@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useChat } from '@multica/hooks/use-chat'
+import { useChat, type MessageSource } from '@multica/hooks/use-chat'
 import type {
   StreamPayload,
   ExecApprovalRequestPayload,
@@ -75,6 +75,16 @@ export function useLocalChat() {
       chatRef.current.addApproval(approval as ExecApprovalRequestPayload)
     })
 
+    // Listen for inbound messages from all sources (gateway, channel)
+    // This allows the local UI to display messages from other sources
+    window.electronAPI.hub.onInboundMessage((event: InboundMessageEvent) => {
+      // Only add non-local messages (local messages are added by sendMessage)
+      if (event.source.type !== 'local' && event.agentId === agentId) {
+        chatRef.current.addUserMessage(event.content, event.agentId, event.source as MessageSource)
+        setIsLoading(true)
+      }
+    })
+
     // Fetch history with pagination
     window.electronAPI.localChat.getHistory(agentId, { limit: DEFAULT_MESSAGES_LIMIT })
       .then((result) => {
@@ -93,6 +103,7 @@ export function useLocalChat() {
     return () => {
       window.electronAPI.localChat.offEvent()
       window.electronAPI.localChat.offApproval()
+      window.electronAPI.hub.offInboundMessage()
       window.electronAPI.localChat.unsubscribe(agentId).catch(() => {})
     }
   }, [agentId])
@@ -101,7 +112,7 @@ export function useLocalChat() {
     (text: string) => {
       const trimmed = text.trim()
       if (!trimmed || !agentId) return
-      chatRef.current.addUserMessage(trimmed, agentId)
+      chatRef.current.addUserMessage(trimmed, agentId, { type: 'local' })
       chatRef.current.setError(null)
       window.electronAPI.localChat.send(agentId, trimmed).catch(() => {})
       setIsLoading(true)

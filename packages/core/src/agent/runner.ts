@@ -108,6 +108,7 @@ export class Agent {
   private _runMutex: Promise<void> = Promise.resolve();
   private _compactionPromise: Promise<void> = Promise.resolve();
   private currentUserDisplayPrompt: string | undefined;
+  private currentUserSource: import("./session/types.js").MessageSource | undefined;
 
   // MulticaEvent subscribers (parallel to PiAgentCore's subscriber list)
   // Typed as AgentEvent | MulticaEvent to match subscribeAll() callback signature
@@ -408,7 +409,7 @@ export class Agent {
 
   async run(
     prompt: string,
-    options?: { displayPrompt?: string },
+    options?: { displayPrompt?: string; source?: import("./session/types.js").MessageSource },
   ): Promise<AgentRunResult> {
     // Run-level mutex: prevents concurrent run/runInternal from mis-tagging messages
     return this.withRunMutex(() => this._run(prompt, options));
@@ -453,7 +454,7 @@ export class Agent {
 
   private async _run(
     prompt: string,
-    options?: { displayPrompt?: string },
+    options?: { displayPrompt?: string; source?: import("./session/types.js").MessageSource },
   ): Promise<AgentRunResult> {
     // Wait for any in-flight compaction from the previous run
     await this._compactionPromise;
@@ -461,6 +462,7 @@ export class Agent {
     this.refreshAuthState();
     this.output.state.lastAssistantText = "";
     this.currentUserDisplayPrompt = options?.displayPrompt;
+    this.currentUserSource = options?.source;
     this._isRunning = true;
     this._aborted = false;
 
@@ -576,6 +578,7 @@ export class Agent {
       this._isRunning = false;
       this._aborted = false;
       this.currentUserDisplayPrompt = undefined;
+      this.currentUserSource = undefined;
     }
   }
 
@@ -667,12 +670,15 @@ export class Agent {
   private handleSessionEvent(event: AgentEvent) {
     if (event.type === "message_end") {
       const message = event.message as AgentMessage;
-      const saveOptions: { internal?: boolean; displayContent?: UserMessage["content"] } = {};
+      const saveOptions: { internal?: boolean; displayContent?: UserMessage["content"]; source?: import("./session/types.js").MessageSource } = {};
       if (this._internalRun) {
         saveOptions.internal = true;
       }
       if (message.role === "user" && this.currentUserDisplayPrompt !== undefined) {
         saveOptions.displayContent = this.currentUserDisplayPrompt;
+      }
+      if (message.role === "user" && this.currentUserSource !== undefined) {
+        saveOptions.source = this.currentUserSource;
       }
       this.session.saveMessage(message, Object.keys(saveOptions).length > 0 ? saveOptions : undefined);
       // Skip compaction during internal runs — internal messages will be

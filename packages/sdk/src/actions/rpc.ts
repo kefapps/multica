@@ -70,11 +70,20 @@ export interface GetAgentMessagesParams {
   limit?: number;
 }
 
+/** Message source: where did this message come from? */
+export type MessageSource =
+  | { type: "local" }
+  | { type: "gateway"; deviceId: string }
+  | { type: "channel"; channelId: string; accountId: string; conversationId: string };
+
 /**
  * Agent message returned by getAgentMessages.
- * This is pi-ai's Message type — the backend returns it as-is from SessionManager.loadMessages().
+ * Extends pi-ai's Message type with optional source field.
  */
-export type AgentMessageItem = Message;
+export type AgentMessageItem = Message & {
+  /** Message source (only for user messages) */
+  source?: MessageSource;
+};
 
 /** getAgentMessages - response payload */
 export interface GetAgentMessagesResult {

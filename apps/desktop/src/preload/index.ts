@@ -81,6 +81,19 @@ export interface LocalChatEvent {
   }
 }
 
+// Inbound message event (from any source: local, gateway, channel)
+export type MessageSource =
+  | { type: 'local' }
+  | { type: 'gateway'; deviceId: string }
+  | { type: 'channel'; channelId: string; accountId: string; conversationId: string }
+
+export interface InboundMessageEvent {
+  agentId: string
+  content: string
+  source: MessageSource
+  timestamp: number
+}
+
 // Local chat approval request (mirrors ExecApprovalRequestPayload from @multica/sdk)
 export interface LocalChatApproval {
   approvalId: string
@@ -148,6 +161,12 @@ const electronAPI = {
     },
     offDevicesChanged: () => {
       ipcRenderer.removeAllListeners('hub:devices-changed')
+    },
+    onInboundMessage: (callback: (event: InboundMessageEvent) => void) => {
+      ipcRenderer.on('hub:inbound-message', (_event, data: InboundMessageEvent) => callback(data))
+    },
+    offInboundMessage: () => {
+      ipcRenderer.removeAllListeners('hub:inbound-message')
     },
   },
 

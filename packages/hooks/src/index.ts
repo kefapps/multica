@@ -8,9 +8,11 @@ export type {
 export { useChat } from "./use-chat";
 export type {
   Message,
+  MessageSource,
   ToolStatus,
   ChatError,
   PendingApproval,
+  CompactionInfo,
   UseChatReturn,
 } from "./use-chat";
 

@@ -1,6 +1,12 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { UserMessage } from "@mariozechner/pi-ai";
 
+/** Message source: where did this message come from? */
+export type MessageSource =
+  | { type: "local" }
+  | { type: "gateway"; deviceId: string }
+  | { type: "channel"; channelId: string; accountId: string; conversationId: string };
+
 export type SessionMeta = {
   provider?: string;
   model?: string;
@@ -22,6 +28,8 @@ export type SessionEntry =
        * When omitted, consumers should fall back to message.content.
        */
       displayContent?: UserMessage["content"];
+      /** Message source (only for user messages) */
+      source?: MessageSource;
     }
   | { type: "meta"; meta: SessionMeta; timestamp: number }
   | {

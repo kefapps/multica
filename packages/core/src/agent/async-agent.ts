@@ -40,6 +40,8 @@ export interface WriteInternalOptions {
 export interface WriteOptions {
   /** Disable automatic message timestamp injection */
   injectTimestamp?: boolean | undefined;
+  /** Message source (where did this message come from?) */
+  source?: import("./session/types.js").MessageSource | undefined;
 }
 
 export class AsyncAgent {
@@ -89,7 +91,7 @@ export class AsyncAgent {
           return;
         }
         console.log(`[AsyncAgent:${this.sessionId.slice(0, 8)}] run() starting for message: ${content.slice(0, 80)}`);
-        const result = await this.agent.run(message, { displayPrompt: content });
+        const result = await this.agent.run(message, { displayPrompt: content, source: options?.source });
         console.log(`[AsyncAgent:${this.sessionId.slice(0, 8)}] run() completed, error=${result.error ?? "none"}`);
         // Flush pending session writes so waitForIdle() callers
         // can safely read session data from disk.

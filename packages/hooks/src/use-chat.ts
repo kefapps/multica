@@ -22,6 +22,12 @@ export interface CompactionInfo {
   reason: string;
 }
 
+/** Message source: where did this message come from? */
+export type MessageSource =
+  | { type: "local" }
+  | { type: "gateway"; deviceId: string }
+  | { type: "channel"; channelId: string; accountId: string; conversationId: string };
+
 export interface Message {
   id: string;
   role: "user" | "assistant" | "toolResult" | "system";
@@ -35,6 +41,8 @@ export interface Message {
   isError?: boolean;
   systemType?: "compaction";
   compaction?: CompactionInfo;
+  /** Message source (only for user messages) */
+  source?: MessageSource;
 }
 
 export interface ChatError {
@@ -95,7 +103,7 @@ export function useChat() {
     const loaded: Message[] = [];
     for (const m of raw) {
       if (m.role === "user") {
-        loaded.push({ id: uuidv7(), role: "user", content: toContentBlocks(m.content), agentId });
+        loaded.push({ id: uuidv7(), role: "user", content: toContentBlocks(m.content), agentId, source: m.source });
       } else if (m.role === "assistant") {
         loaded.push({ id: uuidv7(), role: "assistant", content: toContentBlocks(m.content), agentId, stopReason: m.stopReason });
       } else if (m.role === "toolResult") {
@@ -133,10 +141,10 @@ export function useChat() {
   }, [convertMessages]);
 
   /** Add a user message */
-  const addUserMessage = useCallback((text: string, agentId: string) => {
+  const addUserMessage = useCallback((text: string, agentId: string, source?: MessageSource) => {
     setMessages((prev) => [
       ...prev,
-      { id: uuidv7(), role: "user", content: [{ type: "text", text }], agentId },
+      { id: uuidv7(), role: "user", content: [{ type: "text", text }], agentId, source },
     ]);
   }, []);
 
