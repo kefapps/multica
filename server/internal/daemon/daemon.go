@@ -84,16 +84,14 @@ func (d *Daemon) registerRuntimes(ctx context.Context) ([]Runtime, error) {
 		"runtimes":     runtimes,
 	}
 
-	var resp struct {
-		Runtimes []Runtime `json:"runtimes"`
-	}
-	if err := d.client.postJSON(ctx, "/api/daemon/register", req, &resp); err != nil {
+	rts, err := d.client.Register(ctx, req)
+	if err != nil {
 		return nil, fmt.Errorf("register runtimes: %w", err)
 	}
-	if len(resp.Runtimes) == 0 {
+	if len(rts) == 0 {
 		return nil, fmt.Errorf("register runtimes: empty response")
 	}
-	return resp.Runtimes, nil
+	return rts, nil
 }
 
 func (d *Daemon) ensurePaired(ctx context.Context) (string, error) {
@@ -160,7 +158,7 @@ func (d *Daemon) ensurePaired(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("pairing session expired before approval")
 		}
 
-		if err := SleepWithContext(ctx, d.cfg.PollInterval); err != nil {
+		if err := sleepWithContext(ctx, d.cfg.PollInterval); err != nil {
 			return "", err
 		}
 	}
@@ -176,10 +174,7 @@ func (d *Daemon) heartbeatLoop(ctx context.Context, runtimeIDs []string) {
 			return
 		case <-ticker.C:
 			for _, rid := range runtimeIDs {
-				err := d.client.postJSON(ctx, "/api/daemon/heartbeat", map[string]string{
-					"runtime_id": rid,
-				}, nil)
-				if err != nil {
+				if err := d.client.SendHeartbeat(ctx, rid); err != nil {
 					d.logger.Printf("heartbeat failed for runtime %s: %v", rid, err)
 				}
 			}
@@ -216,7 +211,7 @@ func (d *Daemon) pollLoop(ctx context.Context, runtimeIDs []string) error {
 
 		if !claimed {
 			pollOffset = (pollOffset + 1) % n
-			if err := SleepWithContext(ctx, d.cfg.PollInterval); err != nil {
+			if err := sleepWithContext(ctx, d.cfg.PollInterval); err != nil {
 				return err
 			}
 		}

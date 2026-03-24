@@ -45,6 +45,26 @@ func LoadCLIConfig() (CLIConfig, error) {
 	return cfg, nil
 }
 
+// LoadWorkspaceIDFromDaemonConfig reads workspace_id from ~/.multica/daemon.json
+// as a fallback when it's not set in the CLI config.
+func LoadWorkspaceIDFromDaemonConfig() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".multica/daemon.json"))
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		WorkspaceID string `json:"workspace_id"`
+	}
+	if json.Unmarshal(data, &cfg) != nil {
+		return ""
+	}
+	return cfg.WorkspaceID
+}
+
 // SaveCLIConfig writes the CLI config to disk.
 func SaveCLIConfig(cfg CLIConfig) error {
 	path, err := CLIConfigPath()

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
@@ -50,6 +51,7 @@ func init() {
 	agentCmd.AddCommand(agentStopCmd)
 
 	agentListCmd.Flags().String("output", "table", "Output format: table or json")
+	agentGetCmd.Flags().String("output", "json", "Output format: table or json")
 }
 
 func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
@@ -84,7 +86,11 @@ func resolveWorkspaceID(cmd *cobra.Command) string {
 		return val
 	}
 	cfg, _ := cli.LoadCLIConfig()
-	return cfg.WorkspaceID
+	if cfg.WorkspaceID != "" {
+		return cfg.WorkspaceID
+	}
+	// Fallback: try daemon.json for workspace_id
+	return cli.LoadWorkspaceIDFromDaemonConfig()
 }
 
 func runAgentList(cmd *cobra.Command, _ []string) error {
@@ -99,7 +105,7 @@ func runAgentList(cmd *cobra.Command, _ []string) error {
 	var agents []map[string]any
 	path := "/api/agents"
 	if client.WorkspaceID != "" {
-		path += "?workspace_id=" + client.WorkspaceID
+		path += "?" + url.Values{"workspace_id": {client.WorkspaceID}}.Encode()
 	}
 	if err := client.GetJSON(ctx, path, &agents); err != nil {
 		return fmt.Errorf("list agents: %w", err)
@@ -138,6 +144,20 @@ func runAgentGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get agent: %w", err)
 	}
 
+	output, _ := cmd.Flags().GetString("output")
+	if output == "table" {
+		headers := []string{"ID", "NAME", "STATUS", "RUNTIME", "DESCRIPTION"}
+		rows := [][]string{{
+			strVal(agent, "id"),
+			strVal(agent, "name"),
+			strVal(agent, "status"),
+			strVal(agent, "runtime_mode"),
+			strVal(agent, "description"),
+		}}
+		cli.PrintTable(os.Stdout, headers, rows)
+		return nil
+	}
+
 	return cli.PrintJSON(os.Stdout, agent)
 }
 
@@ -159,8 +179,21 @@ func runAgentDelete(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentStop(cmd *cobra.Command, args []string) error {
-	// TODO: implement agent stop (PUT /api/agents/{id} with status=offline)
-	return fmt.Errorf("agent stop is not yet implemented")
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	body := map[string]any{"status": "offline"}
+	if err := client.PutJSON(ctx, "/api/agents/"+args[0], body, nil); err != nil {
+		return fmt.Errorf("stop agent: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Agent %s stopped.\n", args[0])
+	return nil
 }
 
 func strVal(m map[string]any, key string) string {

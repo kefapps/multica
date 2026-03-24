@@ -8,9 +8,7 @@ import (
 	"time"
 )
 
-// EnvOrDefault returns the trimmed value of the environment variable key,
-// falling back to fallback if empty.
-func EnvOrDefault(key, fallback string) string {
+func envOrDefault(key, fallback string) string {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback
@@ -18,9 +16,7 @@ func EnvOrDefault(key, fallback string) string {
 	return value
 }
 
-// DurationFromEnv parses a duration from an environment variable,
-// returning fallback if the variable is empty.
-func DurationFromEnv(key string, fallback time.Duration) (time.Duration, error) {
+func durationFromEnv(key string, fallback time.Duration) (time.Duration, error) {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback, nil
@@ -32,8 +28,7 @@ func DurationFromEnv(key string, fallback time.Duration) (time.Duration, error) 
 	return d, nil
 }
 
-// SleepWithContext blocks for the given duration or until the context is cancelled.
-func SleepWithContext(ctx context.Context, d time.Duration) error {
+func sleepWithContext(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 

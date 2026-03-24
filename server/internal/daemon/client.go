@@ -84,6 +84,22 @@ func (c *Client) FailTask(ctx context.Context, taskID, errMsg string) error {
 	}, nil)
 }
 
+func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) error {
+	return c.postJSON(ctx, "/api/daemon/heartbeat", map[string]string{
+		"runtime_id": runtimeID,
+	}, nil)
+}
+
+func (c *Client) Register(ctx context.Context, req map[string]any) ([]Runtime, error) {
+	var resp struct {
+		Runtimes []Runtime `json:"runtimes"`
+	}
+	if err := c.postJSON(ctx, "/api/daemon/register", req, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Runtimes, nil
+}
+
 func (c *Client) postJSON(ctx context.Context, path string, reqBody any, respBody any) error {
 	var body io.Reader
 	if reqBody != nil {

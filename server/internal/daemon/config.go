@@ -55,7 +55,7 @@ type Overrides struct {
 // persisted config, and optional CLI flag overrides.
 func LoadConfig(overrides Overrides) (Config, error) {
 	// Server URL: override > env > default
-	rawServerURL := EnvOrDefault("MULTICA_SERVER_URL", DefaultServerURL)
+	rawServerURL := envOrDefault("MULTICA_SERVER_URL", DefaultServerURL)
 	if overrides.ServerURL != "" {
 		rawServerURL = overrides.ServerURL
 	}
@@ -91,14 +91,14 @@ func LoadConfig(overrides Overrides) (Config, error) {
 
 	// Probe available agent CLIs
 	agents := map[string]AgentEntry{}
-	claudePath := EnvOrDefault("MULTICA_CLAUDE_PATH", "claude")
+	claudePath := envOrDefault("MULTICA_CLAUDE_PATH", "claude")
 	if _, err := exec.LookPath(claudePath); err == nil {
 		agents["claude"] = AgentEntry{
 			Path:  claudePath,
 			Model: strings.TrimSpace(os.Getenv("MULTICA_CLAUDE_MODEL")),
 		}
 	}
-	codexPath := EnvOrDefault("MULTICA_CODEX_PATH", "codex")
+	codexPath := envOrDefault("MULTICA_CODEX_PATH", "codex")
 	if _, err := exec.LookPath(codexPath); err == nil {
 		agents["codex"] = AgentEntry{
 			Path:  codexPath,
@@ -132,7 +132,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	}
 
 	// Durations: override > env > default
-	pollInterval, err := DurationFromEnv("MULTICA_DAEMON_POLL_INTERVAL", DefaultPollInterval)
+	pollInterval, err := durationFromEnv("MULTICA_DAEMON_POLL_INTERVAL", DefaultPollInterval)
 	if err != nil {
 		return Config{}, err
 	}
@@ -140,7 +140,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		pollInterval = overrides.PollInterval
 	}
 
-	heartbeatInterval, err := DurationFromEnv("MULTICA_DAEMON_HEARTBEAT_INTERVAL", DefaultHeartbeatInterval)
+	heartbeatInterval, err := durationFromEnv("MULTICA_DAEMON_HEARTBEAT_INTERVAL", DefaultHeartbeatInterval)
 	if err != nil {
 		return Config{}, err
 	}
@@ -148,7 +148,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		heartbeatInterval = overrides.HeartbeatInterval
 	}
 
-	agentTimeout, err := DurationFromEnv("MULTICA_AGENT_TIMEOUT", DefaultAgentTimeout)
+	agentTimeout, err := durationFromEnv("MULTICA_AGENT_TIMEOUT", DefaultAgentTimeout)
 	if err != nil {
 		return Config{}, err
 	}
@@ -157,17 +157,17 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	}
 
 	// String overrides
-	daemonID := EnvOrDefault("MULTICA_DAEMON_ID", host)
+	daemonID := envOrDefault("MULTICA_DAEMON_ID", host)
 	if overrides.DaemonID != "" {
 		daemonID = overrides.DaemonID
 	}
 
-	deviceName := EnvOrDefault("MULTICA_DAEMON_DEVICE_NAME", host)
+	deviceName := envOrDefault("MULTICA_DAEMON_DEVICE_NAME", host)
 	if overrides.DeviceName != "" {
 		deviceName = overrides.DeviceName
 	}
 
-	runtimeName := EnvOrDefault("MULTICA_AGENT_RUNTIME_NAME", DefaultRuntimeName)
+	runtimeName := envOrDefault("MULTICA_AGENT_RUNTIME_NAME", DefaultRuntimeName)
 	if overrides.RuntimeName != "" {
 		runtimeName = overrides.RuntimeName
 	}
