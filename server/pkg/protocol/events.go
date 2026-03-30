@@ -8,9 +8,13 @@ const (
 	EventIssueDeleted = "issue:deleted"
 
 	// Comment events
-	EventCommentCreated = "comment:created"
-	EventCommentUpdated = "comment:updated"
-	EventCommentDeleted = "comment:deleted"
+	EventCommentCreated       = "comment:created"
+	EventCommentUpdated       = "comment:updated"
+	EventCommentDeleted       = "comment:deleted"
+	EventReactionAdded          = "reaction:added"
+	EventReactionRemoved        = "reaction:removed"
+	EventIssueReactionAdded     = "issue_reaction:added"
+	EventIssueReactionRemoved   = "issue_reaction:removed"
 
 	// Agent events
 	EventAgentStatus  = "agent:status"

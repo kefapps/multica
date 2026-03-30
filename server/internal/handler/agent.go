@@ -246,7 +246,7 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Visibility == "" {
-		req.Visibility = "workspace"
+		req.Visibility = "private"
 	}
 	if req.MaxConcurrentTasks == 0 {
 		req.MaxConcurrentTasks = 6
@@ -325,13 +325,35 @@ type UpdateAgentRequest struct {
 	Triggers           any     `json:"triggers"`
 }
 
+// canManageAgent checks whether the current user can update or delete an agent.
+// Workspace-visible agents require owner/admin role. Private agents additionally
+// require the user to be the agent's owner (or a workspace owner/admin).
+func (h *Handler) canManageAgent(w http.ResponseWriter, r *http.Request, agent db.Agent) bool {
+	wsID := uuidToString(agent.WorkspaceID)
+	member, ok := h.requireWorkspaceRole(w, r, wsID, "agent not found", "owner", "admin", "member")
+	if !ok {
+		return false
+	}
+	isAdmin := roleAllowed(member.Role, "owner", "admin")
+	isAgentOwner := uuidToString(agent.OwnerID) == requestUserID(r)
+	if agent.Visibility == "private" && !isAdmin && !isAgentOwner {
+		writeError(w, http.StatusForbidden, "only the agent owner can manage this private agent")
+		return false
+	}
+	if agent.Visibility != "private" && !isAdmin && !isAgentOwner {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return false
+	}
+	return true
+}
+
 func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	agent, ok := h.loadAgentForUser(w, r, id)
 	if !ok {
 		return
 	}
-	if _, ok := h.requireWorkspaceRole(w, r, uuidToString(agent.WorkspaceID), "agent not found", "owner", "admin"); !ok {
+	if !h.canManageAgent(w, r, agent) {
 		return
 	}
 
@@ -413,8 +435,7 @@ func (h *Handler) DeleteAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	wsID := uuidToString(agent.WorkspaceID)
 
-	// Require owner or admin role
-	if _, ok := h.requireWorkspaceRole(w, r, wsID, "agent not found", "owner", "admin"); !ok {
+	if !h.canManageAgent(w, r, agent) {
 		return
 	}
 

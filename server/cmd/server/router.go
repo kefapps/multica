@@ -168,6 +168,8 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus) chi.Route
 					r.Post("/unsubscribe", h.UnsubscribeFromIssue)
 					r.Get("/active-task", h.GetActiveTaskForIssue)
 					r.Get("/task-runs", h.ListTasksByIssue)
+					r.Post("/reactions", h.AddIssueReaction)
+					r.Delete("/reactions", h.RemoveIssueReaction)
 				})
 			})
 
@@ -175,6 +177,8 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus) chi.Route
 			r.Route("/api/comments/{commentId}", func(r chi.Router) {
 				r.Put("/", h.UpdateComment)
 				r.Delete("/", h.DeleteComment)
+				r.Post("/reactions", h.AddReaction)
+				r.Delete("/reactions", h.RemoveReaction)
 			})
 
 			// Agents

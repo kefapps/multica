@@ -473,6 +473,76 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 		}
 	})
 
+	// issue_reaction:added — notify the issue creator
+	bus.Subscribe(protocol.EventIssueReactionAdded, func(e events.Event) {
+		payload, ok := e.Payload.(map[string]any)
+		if !ok {
+			return
+		}
+
+		reaction, ok := payload["reaction"].(handler.IssueReactionResponse)
+		if !ok {
+			return
+		}
+
+		creatorType, _ := payload["creator_type"].(string)
+		creatorID, _ := payload["creator_id"].(string)
+		issueID, _ := payload["issue_id"].(string)
+		issueTitle, _ := payload["issue_title"].(string)
+		issueStatus, _ := payload["issue_status"].(string)
+
+		if creatorType == "" || creatorID == "" {
+			return
+		}
+
+		details, _ := json.Marshal(map[string]string{
+			"emoji": reaction.Emoji,
+		})
+
+		notifyDirect(ctx, queries, bus,
+			creatorType, creatorID,
+			e.WorkspaceID, e, issueID, issueStatus,
+			"reaction_added", "info",
+			issueTitle, "",
+			details,
+		)
+	})
+
+	// reaction:added — notify the comment author
+	bus.Subscribe(protocol.EventReactionAdded, func(e events.Event) {
+		payload, ok := e.Payload.(map[string]any)
+		if !ok {
+			return
+		}
+
+		reaction, ok := payload["reaction"].(handler.ReactionResponse)
+		if !ok {
+			return
+		}
+
+		commentAuthorType, _ := payload["comment_author_type"].(string)
+		commentAuthorID, _ := payload["comment_author_id"].(string)
+		issueID, _ := payload["issue_id"].(string)
+		issueTitle, _ := payload["issue_title"].(string)
+		issueStatus, _ := payload["issue_status"].(string)
+
+		if commentAuthorType == "" || commentAuthorID == "" {
+			return
+		}
+
+		details, _ := json.Marshal(map[string]string{
+			"emoji": reaction.Emoji,
+		})
+
+		notifyDirect(ctx, queries, bus,
+			commentAuthorType, commentAuthorID,
+			e.WorkspaceID, e, issueID, issueStatus,
+			"reaction_added", "info",
+			issueTitle, "",
+			details,
+		)
+	})
+
 	// task:completed — notify all subscribers except the agent
 	bus.Subscribe(protocol.EventTaskCompleted, func(e events.Event) {
 		payload, ok := e.Payload.(map[string]any)

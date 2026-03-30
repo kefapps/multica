@@ -13,18 +13,22 @@ import (
 )
 
 type CommentResponse struct {
-	ID         string  `json:"id"`
-	IssueID    string  `json:"issue_id"`
-	AuthorType string  `json:"author_type"`
-	AuthorID   string  `json:"author_id"`
-	Content    string  `json:"content"`
-	Type       string  `json:"type"`
-	ParentID   *string `json:"parent_id"`
-	CreatedAt  string  `json:"created_at"`
-	UpdatedAt  string  `json:"updated_at"`
+	ID         string             `json:"id"`
+	IssueID    string             `json:"issue_id"`
+	AuthorType string             `json:"author_type"`
+	AuthorID   string             `json:"author_id"`
+	Content    string             `json:"content"`
+	Type       string             `json:"type"`
+	ParentID   *string            `json:"parent_id"`
+	CreatedAt  string             `json:"created_at"`
+	UpdatedAt  string             `json:"updated_at"`
+	Reactions  []ReactionResponse `json:"reactions"`
 }
 
-func commentToResponse(c db.Comment) CommentResponse {
+func commentToResponse(c db.Comment, reactions []ReactionResponse) CommentResponse {
+	if reactions == nil {
+		reactions = []ReactionResponse{}
+	}
 	return CommentResponse{
 		ID:         uuidToString(c.ID),
 		IssueID:    uuidToString(c.IssueID),
@@ -35,6 +39,7 @@ func commentToResponse(c db.Comment) CommentResponse {
 		ParentID:   uuidToPtr(c.ParentID),
 		CreatedAt:  timestampToString(c.CreatedAt),
 		UpdatedAt:  timestampToString(c.UpdatedAt),
+		Reactions:  reactions,
 	}
 }
 
@@ -54,9 +59,15 @@ func (h *Handler) ListComments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	commentIDs := make([]pgtype.UUID, len(comments))
+	for i, c := range comments {
+		commentIDs[i] = c.ID
+	}
+	grouped := h.groupReactions(r, commentIDs)
+
 	resp := make([]CommentResponse, len(comments))
 	for i, c := range comments {
-		resp[i] = commentToResponse(c)
+		resp[i] = commentToResponse(c, grouped[uuidToString(c.ID)])
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -122,7 +133,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := commentToResponse(comment)
+	resp := commentToResponse(comment, nil)
 	slog.Info("comment created", append(logger.RequestAttrs(r), "comment_id", uuidToString(comment.ID), "issue_id", issueID)...)
 	h.publish(protocol.EventCommentCreated, uuidToString(issue.WorkspaceID), authorType, authorID, map[string]any{
 		"comment":             resp,
@@ -197,7 +208,9 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := commentToResponse(comment)
+	// Fetch reactions for the updated comment.
+	grouped := h.groupReactions(r, []pgtype.UUID{comment.ID})
+	resp := commentToResponse(comment, grouped[uuidToString(comment.ID)])
 	slog.Info("comment updated", append(logger.RequestAttrs(r), "comment_id", commentId)...)
 	h.publish(protocol.EventCommentUpdated, workspaceID, actorType, actorID, map[string]any{"comment": resp})
 	writeJSON(w, http.StatusOK, resp)

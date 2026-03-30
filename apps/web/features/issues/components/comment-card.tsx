@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { ActorAvatar } from "@/components/common/actor-avatar";
+import { ReactionBar } from "@/components/common/reaction-bar";
 import { Markdown } from "@/components/markdown";
 import { useActorName } from "@/features/workspace";
 import { timeAgo } from "@/shared/utils";
@@ -31,6 +32,7 @@ interface CommentCardProps {
   onReply: (parentId: string, content: string) => Promise<void>;
   onEdit: (commentId: string, content: string) => Promise<void>;
   onDelete: (commentId: string) => void;
+  onToggleReaction: (commentId: string, emoji: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -42,11 +44,13 @@ function CommentRow({
   currentUserId,
   onEdit,
   onDelete,
+  onToggleReaction,
 }: {
   entry: TimelineEntry;
   currentUserId?: string;
   onEdit: (commentId: string, content: string) => Promise<void>;
   onDelete: (commentId: string) => void;
+  onToggleReaction: (commentId: string, emoji: string) => void;
 }) {
   const { getActorName } = useActorName();
   const [editing, setEditing] = useState(false);
@@ -76,6 +80,8 @@ function CommentRow({
       toast.error("Failed to update comment");
     }
   };
+
+  const reactions = entry.reactions ?? [];
 
   return (
     <div className={`py-3${isTemp ? " opacity-60" : ""}`}>
@@ -136,9 +142,19 @@ function CommentRow({
           </div>
         </form>
       ) : (
-        <div className="mt-1.5 pl-8 text-sm leading-relaxed text-foreground/85">
-          <Markdown mode="minimal">{entry.content ?? ""}</Markdown>
-        </div>
+        <>
+          <div className="mt-1.5 pl-8 text-sm leading-relaxed text-foreground/85">
+            <Markdown mode="minimal">{entry.content ?? ""}</Markdown>
+          </div>
+          {!isTemp && (
+            <ReactionBar
+              reactions={reactions}
+              currentUserId={currentUserId}
+              onToggle={(emoji) => onToggleReaction(entry.id, emoji)}
+              className="mt-1.5 pl-8"
+            />
+          )}
+        </>
       )}
     </div>
   );
@@ -155,6 +171,7 @@ function CommentCard({
   onReply,
   onEdit,
   onDelete,
+  onToggleReaction,
 }: CommentCardProps) {
   // Collect all nested replies recursively into a flat list
   const allNestedReplies: TimelineEntry[] = [];
@@ -176,6 +193,7 @@ function CommentCard({
           currentUserId={currentUserId}
           onEdit={onEdit}
           onDelete={onDelete}
+          onToggleReaction={onToggleReaction}
         />
       </div>
 
@@ -187,6 +205,7 @@ function CommentCard({
             currentUserId={currentUserId}
             onEdit={onEdit}
             onDelete={onDelete}
+            onToggleReaction={onToggleReaction}
           />
         </div>
       ))}

@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Bot, UserMinus } from "lucide-react";
-import type { IssueAssigneeType, UpdateIssueRequest } from "@/shared/types";
+import { Bot, Lock, UserMinus } from "lucide-react";
+import type { Agent, IssueAssigneeType, UpdateIssueRequest } from "@/shared/types";
+import { useAuthStore } from "@/features/auth";
 import { useWorkspaceStore, useActorName } from "@/features/workspace";
 import {
   PropertyPicker,
@@ -10,6 +11,13 @@ import {
   PickerSection,
   PickerEmpty,
 } from "./property-picker";
+
+function canAssignAgent(agent: Agent, userId: string | undefined, memberRole: string | undefined): boolean {
+  if (agent.visibility !== "private") return true;
+  if (agent.owner_id === userId) return true;
+  if (memberRole === "owner" || memberRole === "admin") return true;
+  return false;
+}
 
 export function AssigneePicker({
   assigneeType,
@@ -24,9 +32,13 @@ export function AssigneePicker({
 }) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
+  const user = useAuthStore((s) => s.user);
   const members = useWorkspaceStore((s) => s.members);
   const agents = useWorkspaceStore((s) => s.agents);
   const { getActorName, getActorInitials } = useActorName();
+
+  const currentMember = members.find((m) => m.user_id === user?.id);
+  const memberRole = currentMember?.role;
 
   const query = filter.toLowerCase();
   const filteredMembers = members.filter((m) =>
@@ -117,24 +129,32 @@ export function AssigneePicker({
       {/* Agents */}
       {filteredAgents.length > 0 && (
         <PickerSection label="Agents">
-          {filteredAgents.map((a) => (
-            <PickerItem
-              key={a.id}
-              selected={isSelected("agent", a.id)}
-              onClick={() => {
-                onUpdate({
-                  assignee_type: "agent",
-                  assignee_id: a.id,
-                });
-                setOpen(false);
-              }}
-            >
-              <div className="inline-flex size-4.5 shrink-0 items-center justify-center rounded-full bg-info/10 text-info">
-                <Bot className="size-2.5" />
-              </div>
-              <span>{a.name}</span>
-            </PickerItem>
-          ))}
+          {filteredAgents.map((a) => {
+            const allowed = canAssignAgent(a, user?.id, memberRole);
+            return (
+              <PickerItem
+                key={a.id}
+                selected={isSelected("agent", a.id)}
+                disabled={!allowed}
+                onClick={() => {
+                  if (!allowed) return;
+                  onUpdate({
+                    assignee_type: "agent",
+                    assignee_id: a.id,
+                  });
+                  setOpen(false);
+                }}
+              >
+                <div className={`inline-flex size-4.5 shrink-0 items-center justify-center rounded-full ${allowed ? "bg-info/10 text-info" : "bg-muted text-muted-foreground"}`}>
+                  <Bot className="size-2.5" />
+                </div>
+                <span className={allowed ? "" : "text-muted-foreground"}>{a.name}</span>
+                {a.visibility === "private" && (
+                  <Lock className="ml-auto h-3 w-3 text-muted-foreground" />
+                )}
+              </PickerItem>
+            );
+          })}
         </PickerSection>
       )}
 

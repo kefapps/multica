@@ -91,6 +91,16 @@ type Comment struct {
 	WorkspaceID pgtype.UUID        `json:"workspace_id"`
 }
 
+type CommentReaction struct {
+	ID          pgtype.UUID        `json:"id"`
+	CommentID   pgtype.UUID        `json:"comment_id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	ActorType   string             `json:"actor_type"`
+	ActorID     pgtype.UUID        `json:"actor_id"`
+	Emoji       string             `json:"emoji"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type DaemonConnection struct {
 	ID              pgtype.UUID        `json:"id"`
 	AgentID         pgtype.UUID        `json:"agent_id"`
@@ -171,6 +181,16 @@ type IssueLabel struct {
 	WorkspaceID pgtype.UUID `json:"workspace_id"`
 	Name        string      `json:"name"`
 	Color       string      `json:"color"`
+}
+
+type IssueReaction struct {
+	ID          pgtype.UUID        `json:"id"`
+	IssueID     pgtype.UUID        `json:"issue_id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	ActorType   string             `json:"actor_type"`
+	ActorID     pgtype.UUID        `json:"actor_id"`
+	Emoji       string             `json:"emoji"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type IssueSubscriber struct {

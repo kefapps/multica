@@ -1,4 +1,4 @@
-export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType } from "./issue";
+export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueReaction } from "./issue";
 export type {
   Agent,
   AgentStatus,
@@ -24,7 +24,7 @@ export type {
 } from "./agent";
 export type { Workspace, WorkspaceRepo, Member, MemberRole, User, MemberWithUser } from "./workspace";
 export type { InboxItem, InboxSeverity, InboxItemType } from "./inbox";
-export type { Comment, CommentType, CommentAuthorType } from "./comment";
+export type { Comment, CommentType, CommentAuthorType, Reaction } from "./comment";
 export type { TimelineEntry } from "./activity";
 export type { IssueSubscriber } from "./subscriber";
 export type { DaemonPairingSession, DaemonPairingSessionStatus, ApproveDaemonPairingSessionRequest } from "./daemon";

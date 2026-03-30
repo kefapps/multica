@@ -1,7 +1,7 @@
-import type { Issue } from "./issue";
+import type { Issue, IssueReaction } from "./issue";
 import type { Agent } from "./agent";
 import type { InboxItem } from "./inbox";
-import type { Comment } from "./comment";
+import type { Comment, Reaction } from "./comment";
 import type { TimelineEntry } from "./activity";
 import type { Workspace, MemberWithUser } from "./workspace";
 
@@ -38,7 +38,11 @@ export type WSEventType =
   | "skill:deleted"
   | "subscriber:added"
   | "subscriber:removed"
-  | "activity:created";
+  | "activity:created"
+  | "reaction:added"
+  | "reaction:removed"
+  | "issue_reaction:added"
+  | "issue_reaction:removed";
 
 export interface WSMessage<T = unknown> {
   type: WSEventType;
@@ -172,4 +176,29 @@ export interface TaskFailedPayload {
   agent_id: string;
   issue_id: string;
   status: string;
+}
+
+export interface ReactionAddedPayload {
+  reaction: Reaction;
+  issue_id: string;
+}
+
+export interface ReactionRemovedPayload {
+  comment_id: string;
+  issue_id: string;
+  emoji: string;
+  actor_type: string;
+  actor_id: string;
+}
+
+export interface IssueReactionAddedPayload {
+  reaction: IssueReaction;
+  issue_id: string;
+}
+
+export interface IssueReactionRemovedPayload {
+  issue_id: string;
+  emoji: string;
+  actor_type: string;
+  actor_id: string;
 }

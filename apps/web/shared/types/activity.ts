@@ -1,3 +1,5 @@
+import type { Reaction } from "./comment";
+
 export interface TimelineEntry {
   type: "activity" | "comment";
   id: string;
@@ -12,4 +14,5 @@ export interface TimelineEntry {
   parent_id?: string | null;
   updated_at?: string;
   comment_type?: string;
+  reactions?: Reaction[];
 }

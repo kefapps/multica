@@ -55,7 +55,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from "@/components/ui/command";
 import { Avatar, AvatarFallback, AvatarGroup, AvatarGroupCount } from "@/components/ui/avatar";
 import { ActorAvatar } from "@/components/common/actor-avatar";
-import type { Issue, Comment, IssueSubscriber, UpdateIssueRequest, IssueStatus, IssuePriority, TimelineEntry } from "@/shared/types";
+import type { Issue, IssueReaction, Comment, IssueSubscriber, UpdateIssueRequest, IssueStatus, IssuePriority, TimelineEntry } from "@/shared/types";
 import { ALL_STATUSES, STATUS_CONFIG, PRIORITY_ORDER, PRIORITY_CONFIG } from "@/features/issues/config";
 import { StatusIcon, PriorityIcon, DueDatePicker } from "@/features/issues/components";
 import { CommentCard } from "./comment-card";
@@ -66,7 +66,8 @@ import { useAuthStore } from "@/features/auth";
 import { useWorkspaceStore, useActorName } from "@/features/workspace";
 import { useWSEvent } from "@/features/realtime";
 import { useIssueStore } from "@/features/issues";
-import type { CommentCreatedPayload, CommentUpdatedPayload, CommentDeletedPayload, SubscriberAddedPayload, SubscriberRemovedPayload, ActivityCreatedPayload } from "@/shared/types";
+import type { CommentCreatedPayload, CommentUpdatedPayload, CommentDeletedPayload, SubscriberAddedPayload, SubscriberRemovedPayload, ActivityCreatedPayload, ReactionAddedPayload, ReactionRemovedPayload, IssueReactionAddedPayload, IssueReactionRemovedPayload } from "@/shared/types";
+import { ReactionBar } from "@/components/common/reaction-bar";
 import { timeAgo } from "@/shared/utils";
 
 function shortDate(date: string | null): string {
@@ -136,6 +137,7 @@ function commentToTimelineEntry(c: Comment): TimelineEntry {
     created_at: c.created_at,
     updated_at: c.updated_at,
     comment_type: c.type,
+    reactions: c.reactions ?? [],
   };
 }
 
@@ -196,6 +198,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   const sidebarRef = usePanelRef();
   const [sidebarOpen, setSidebarOpen] = useState(defaultSidebarOpen);
   const [issue, setIssue] = useState<Issue | null>(null);
+  const [issueReactions, setIssueReactions] = useState<IssueReaction[]>([]);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [subscribers, setSubscribers] = useState<IssueSubscriber[]>([]);
   const [loading, setLoading] = useState(true);
@@ -229,12 +232,14 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
     wasLoadedRef.current = false;
     setIssue(null);
     setTitleDraft("");
+    setIssueReactions([]);
     setTimeline([]);
     setSubscribers([]);
     setLoading(true);
     Promise.all([api.getIssue(id), api.listTimeline(id), api.listIssueSubscribers(id)])
       .then(([iss, entries, subs]) => {
         setIssue(iss);
+        setIssueReactions(iss.reactions ?? []);
         setTitleDraft(iss.title);
         setTimeline(entries);
         setSubscribers(subs);
@@ -430,6 +435,157 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
       });
     }, [id]),
   );
+
+  // Real-time reaction updates
+  useWSEvent(
+    "reaction:added",
+    useCallback((payload: unknown) => {
+      const { reaction, issue_id } = payload as ReactionAddedPayload;
+      if (issue_id !== id) return;
+      // Skip own reactions — already added optimistically
+      if (reaction.actor_type === "member" && reaction.actor_id === user?.id) return;
+      setTimeline((prev) => prev.map((e) => {
+        if (e.id !== reaction.comment_id) return e;
+        const existing = e.reactions ?? [];
+        if (existing.some((r) => r.id === reaction.id)) return e;
+        return { ...e, reactions: [...existing, reaction] };
+      }));
+    }, [id, user?.id]),
+  );
+
+  useWSEvent(
+    "reaction:removed",
+    useCallback((payload: unknown) => {
+      const p = payload as ReactionRemovedPayload;
+      if (p.issue_id !== id) return;
+      // Skip own removals — already removed optimistically
+      if (p.actor_type === "member" && p.actor_id === user?.id) return;
+      setTimeline((prev) => prev.map((e) => {
+        if (e.id !== p.comment_id) return e;
+        return {
+          ...e,
+          reactions: (e.reactions ?? []).filter(
+            (r) => !(r.emoji === p.emoji && r.actor_type === p.actor_type && r.actor_id === p.actor_id),
+          ),
+        };
+      }));
+    }, [id, user?.id]),
+  );
+
+  // Real-time issue reaction updates
+  useWSEvent(
+    "issue_reaction:added",
+    useCallback((payload: unknown) => {
+      const { reaction, issue_id } = payload as IssueReactionAddedPayload;
+      if (issue_id !== id) return;
+      if (reaction.actor_type === "member" && reaction.actor_id === user?.id) return;
+      setIssueReactions((prev) => {
+        if (prev.some((r) => r.id === reaction.id)) return prev;
+        return [...prev, reaction];
+      });
+    }, [id, user?.id]),
+  );
+
+  useWSEvent(
+    "issue_reaction:removed",
+    useCallback((payload: unknown) => {
+      const p = payload as IssueReactionRemovedPayload;
+      if (p.issue_id !== id) return;
+      if (p.actor_type === "member" && p.actor_id === user?.id) return;
+      setIssueReactions((prev) =>
+        prev.filter((r) => !(r.emoji === p.emoji && r.actor_type === p.actor_type && r.actor_id === p.actor_id)),
+      );
+    }, [id, user?.id]),
+  );
+
+  const handleToggleIssueReaction = async (emoji: string) => {
+    if (!user) return;
+    const existing = issueReactions.find(
+      (r) => r.emoji === emoji && r.actor_type === "member" && r.actor_id === user.id,
+    );
+    if (existing) {
+      setIssueReactions((prev) => prev.filter((r) => r.id !== existing.id));
+      try {
+        await api.removeIssueReaction(id, emoji);
+      } catch {
+        setIssueReactions((prev) => [...prev, existing]);
+        toast.error("Failed to remove reaction");
+      }
+    } else {
+      const temp = {
+        id: `temp-${Date.now()}`,
+        issue_id: id,
+        actor_type: "member",
+        actor_id: user.id,
+        emoji,
+        created_at: new Date().toISOString(),
+      };
+      setIssueReactions((prev) => [...prev, temp]);
+      try {
+        const reaction = await api.addIssueReaction(id, emoji);
+        setIssueReactions((prev) => prev.map((r) => (r.id === temp.id ? reaction : r)));
+      } catch {
+        setIssueReactions((prev) => prev.filter((r) => r.id !== temp.id));
+        toast.error("Failed to add reaction");
+      }
+    }
+  };
+
+  const handleToggleReaction = async (commentId: string, emoji: string) => {
+    if (!user) return;
+    const entry = timeline.find((e) => e.id === commentId);
+    const existing = (entry?.reactions ?? []).find(
+      (r) => r.emoji === emoji && r.actor_type === "member" && r.actor_id === user.id,
+    );
+    if (existing) {
+      // Optimistic remove
+      setTimeline((prev) => prev.map((e) => {
+        if (e.id !== commentId) return e;
+        return { ...e, reactions: (e.reactions ?? []).filter((r) => r.id !== existing.id) };
+      }));
+      try {
+        await api.removeReaction(commentId, emoji);
+      } catch {
+        // Rollback
+        setTimeline((prev) => prev.map((e) => {
+          if (e.id !== commentId) return e;
+          return { ...e, reactions: [...(e.reactions ?? []), existing] };
+        }));
+        toast.error("Failed to remove reaction");
+      }
+    } else {
+      // Optimistic add
+      const tempReaction = {
+        id: `temp-${Date.now()}`,
+        comment_id: commentId,
+        actor_type: "member",
+        actor_id: user.id,
+        emoji,
+        created_at: new Date().toISOString(),
+      };
+      setTimeline((prev) => prev.map((e) => {
+        if (e.id !== commentId) return e;
+        return { ...e, reactions: [...(e.reactions ?? []), tempReaction] };
+      }));
+      try {
+        const reaction = await api.addReaction(commentId, emoji);
+        setTimeline((prev) => prev.map((e) => {
+          if (e.id !== commentId) return e;
+          return {
+            ...e,
+            reactions: (e.reactions ?? []).map((r) => (r.id === tempReaction.id ? reaction : r)),
+          };
+        }));
+      } catch {
+        // Rollback
+        setTimeline((prev) => prev.map((e) => {
+          if (e.id !== commentId) return e;
+          return { ...e, reactions: (e.reactions ?? []).filter((r) => r.id !== tempReaction.id) };
+        }));
+        toast.error("Failed to add reaction");
+      }
+    }
+  };
 
   // Real-time subscriber updates
   useWSEvent(
@@ -771,6 +927,13 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
             className="mt-5"
           />
 
+          <ReactionBar
+            reactions={issueReactions}
+            currentUserId={user?.id}
+            onToggle={handleToggleIssueReaction}
+            className="mt-3"
+          />
+
           <div className="my-8 border-t" />
 
           {/* Activity / Comments */}
@@ -933,6 +1096,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                         onReply={handleSubmitReply}
                         onEdit={handleEditComment}
                         onDelete={handleDeleteComment}
+                        onToggleReaction={handleToggleReaction}
                       />
                     );
                   }

@@ -79,11 +79,13 @@ export function PropertyPicker({
 
 export function PickerItem({
   selected,
+  disabled,
   onClick,
   hoverClassName,
   children,
 }: {
   selected: boolean;
+  disabled?: boolean;
   onClick: () => void;
   hoverClassName?: string;
   children: React.ReactNode;
@@ -91,8 +93,9 @@ export function PickerItem({
   return (
     <button
       type="button"
+      disabled={disabled}
       onClick={onClick}
-      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm ${hoverClassName ?? "hover:bg-accent"} transition-colors`}
+      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm ${disabled ? "opacity-50 cursor-not-allowed" : hoverClassName ?? "hover:bg-accent"} transition-colors`}
     >
       <span className="flex flex-1 items-center gap-2">{children}</span>
       {selected && <Check className="h-3.5 w-3.5 text-muted-foreground" />}

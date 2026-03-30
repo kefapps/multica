@@ -25,10 +25,13 @@ import {
   MoreHorizontal,
   Play,
   ChevronDown,
+  Globe,
+  Lock,
 } from "lucide-react";
 import type {
   Agent,
   AgentStatus,
+  AgentVisibility,
   AgentTool,
   AgentTrigger,
   AgentTriggerType,
@@ -126,6 +129,7 @@ function CreateAgentDialog({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [selectedRuntimeId, setSelectedRuntimeId] = useState(runtimes[0]?.id ?? "");
+  const [visibility, setVisibility] = useState<AgentVisibility>("private");
   const [creating, setCreating] = useState(false);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
 
@@ -145,6 +149,7 @@ function CreateAgentDialog({
         name: name.trim(),
         description: description.trim(),
         runtime_id: selectedRuntime.id,
+        visibility,
         triggers: [{ id: generateId(), type: "on_assign", enabled: true, config: {} }],
       });
       onClose();
@@ -187,6 +192,42 @@ function CreateAgentDialog({
               placeholder="What does this agent do?"
               className="mt-1"
             />
+          </div>
+
+          <div>
+            <Label className="text-xs text-muted-foreground">Visibility</Label>
+            <div className="mt-1.5 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setVisibility("workspace")}
+                className={`flex flex-1 items-center gap-2 rounded-lg border px-3 py-2.5 text-sm transition-colors ${
+                  visibility === "workspace"
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:bg-muted"
+                }`}
+              >
+                <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <div className="text-left">
+                  <div className="font-medium">Workspace</div>
+                  <div className="text-xs text-muted-foreground">All members can assign</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setVisibility("private")}
+                className={`flex flex-1 items-center gap-2 rounded-lg border px-3 py-2.5 text-sm transition-colors ${
+                  visibility === "private"
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:bg-muted"
+                }`}
+              >
+                <Lock className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <div className="text-left">
+                  <div className="font-medium">Private</div>
+                  <div className="text-xs text-muted-foreground">Only you can assign</div>
+                </div>
+              </button>
+            </div>
           </div>
 
           <div>

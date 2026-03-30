@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -24,10 +25,11 @@ type TimelineEntry struct {
 	Details json.RawMessage `json:"details,omitempty"`
 
 	// Comment-only fields
-	Content     *string `json:"content,omitempty"`
-	ParentID    *string `json:"parent_id,omitempty"`
-	UpdatedAt   *string `json:"updated_at,omitempty"`
-	CommentType *string `json:"comment_type,omitempty"`
+	Content     *string            `json:"content,omitempty"`
+	ParentID    *string            `json:"parent_id,omitempty"`
+	UpdatedAt   *string            `json:"updated_at,omitempty"`
+	CommentType *string            `json:"comment_type,omitempty"`
+	Reactions   []ReactionResponse `json:"reactions,omitempty"`
 }
 
 // ListTimeline returns a merged, chronologically-sorted timeline of activities
@@ -77,6 +79,13 @@ func (h *Handler) ListTimeline(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Fetch reactions for all comments in one batch.
+	commentIDs := make([]pgtype.UUID, len(comments))
+	for i, c := range comments {
+		commentIDs[i] = c.ID
+	}
+	grouped := h.groupReactions(r, commentIDs)
+
 	for _, c := range comments {
 		content := c.Content
 		commentType := c.Type
@@ -91,6 +100,7 @@ func (h *Handler) ListTimeline(w http.ResponseWriter, r *http.Request) {
 			ParentID:    uuidToPtr(c.ParentID),
 			CreatedAt:   timestampToString(c.CreatedAt),
 			UpdatedAt:   &updatedAt,
+			Reactions:   grouped[uuidToString(c.ID)],
 		})
 	}
 

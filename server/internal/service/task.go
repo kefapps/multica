@@ -16,6 +16,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
+	"github.com/multica-ai/multica/server/pkg/redact"
 )
 
 type TaskService struct {
@@ -187,7 +188,7 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	var payload protocol.TaskCompletedPayload
 	if err := json.Unmarshal(result, &payload); err == nil {
 		if payload.Output != "" {
-			s.createAgentComment(ctx, task.IssueID, task.AgentID, payload.Output, "comment")
+			s.createAgentComment(ctx, task.IssueID, task.AgentID, redact.Text(payload.Output), "comment")
 		}
 	}
 
@@ -227,7 +228,7 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg s
 	slog.Warn("task failed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID), "error", errMsg)
 
 	if errMsg != "" {
-		s.createAgentComment(ctx, task.IssueID, task.AgentID, errMsg, "system")
+		s.createAgentComment(ctx, task.IssueID, task.AgentID, redact.Text(errMsg), "system")
 	}
 	// Reconcile agent status
 	s.ReconcileAgentStatus(ctx, task.AgentID)

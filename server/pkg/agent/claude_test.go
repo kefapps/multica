@@ -218,6 +218,7 @@ func TestBuildEnvNilExtras(t *testing.T) {
 	}
 }
 
+
 func mustMarshal(t *testing.T, v any) json.RawMessage {
 	t.Helper()
 	data, err := json.Marshal(v)

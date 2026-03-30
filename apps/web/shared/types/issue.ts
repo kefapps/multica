@@ -11,6 +11,15 @@ export type IssuePriority = "urgent" | "high" | "medium" | "low" | "none";
 
 export type IssueAssigneeType = "member" | "agent";
 
+export interface IssueReaction {
+  id: string;
+  issue_id: string;
+  actor_type: string;
+  actor_id: string;
+  emoji: string;
+  created_at: string;
+}
+
 export interface Issue {
   id: string;
   workspace_id: string;
@@ -27,6 +36,7 @@ export interface Issue {
   parent_issue_id: string | null;
   position: number;
   due_date: string | null;
+  reactions?: IssueReaction[];
   created_at: string;
   updated_at: string;
 }

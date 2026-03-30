@@ -2,6 +2,15 @@ export type CommentType = "comment" | "status_change" | "progress_update" | "sys
 
 export type CommentAuthorType = "member" | "agent";
 
+export interface Reaction {
+  id: string;
+  comment_id: string;
+  actor_type: string;
+  actor_id: string;
+  emoji: string;
+  created_at: string;
+}
+
 export interface Comment {
   id: string;
   issue_id: string;
@@ -10,6 +19,7 @@ export interface Comment {
   content: string;
   type: CommentType;
   parent_id: string | null;
+  reactions: Reaction[];
   created_at: string;
   updated_at: string;
 }

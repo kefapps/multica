@@ -17,6 +17,8 @@ import type {
   InboxItem,
   IssueSubscriber,
   Comment,
+  Reaction,
+  IssueReaction,
   Workspace,
   WorkspaceRepo,
   MemberWithUser,
@@ -224,6 +226,34 @@ export class ApiClient {
 
   async deleteComment(commentId: string): Promise<void> {
     await this.fetch(`/api/comments/${commentId}`, { method: "DELETE" });
+  }
+
+  async addReaction(commentId: string, emoji: string): Promise<Reaction> {
+    return this.fetch(`/api/comments/${commentId}/reactions`, {
+      method: "POST",
+      body: JSON.stringify({ emoji }),
+    });
+  }
+
+  async removeReaction(commentId: string, emoji: string): Promise<void> {
+    await this.fetch(`/api/comments/${commentId}/reactions`, {
+      method: "DELETE",
+      body: JSON.stringify({ emoji }),
+    });
+  }
+
+  async addIssueReaction(issueId: string, emoji: string): Promise<IssueReaction> {
+    return this.fetch(`/api/issues/${issueId}/reactions`, {
+      method: "POST",
+      body: JSON.stringify({ emoji }),
+    });
+  }
+
+  async removeIssueReaction(issueId: string, emoji: string): Promise<void> {
+    await this.fetch(`/api/issues/${issueId}/reactions`, {
+      method: "DELETE",
+      body: JSON.stringify({ emoji }),
+    });
   }
 
   // Subscribers

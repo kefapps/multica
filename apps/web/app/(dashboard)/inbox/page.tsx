@@ -52,6 +52,7 @@ const typeLabels: Record<InboxItemType, string> = {
   task_failed: "Task failed",
   agent_blocked: "Agent blocked",
   agent_completed: "Agent completed",
+  reaction_added: "Reacted",
 };
 
 function timeAgo(dateStr: string): string {
@@ -124,6 +125,11 @@ function InboxDetailLabel({ item }: { item: InboxItem }) {
     }
     case "new_comment": {
       if (item.body) return <span>{item.body}</span>;
+      return <span>{typeLabels[item.type]}</span>;
+    }
+    case "reaction_added": {
+      const emoji = details.emoji;
+      if (emoji) return <span>Reacted {emoji} to your comment</span>;
       return <span>{typeLabels[item.type]}</span>;
     }
     default:
