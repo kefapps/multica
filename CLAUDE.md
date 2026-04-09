@@ -102,21 +102,7 @@ Shared business UI pages. **Zero `next/*` imports. Zero `react-router-dom` impor
 - `my-issues/`, `skills/`, `runtimes/`, `agents/`, `inbox/`, `settings/` — domain pages
 - `common/` — Data-aware wrappers (ActorAvatar with useActorName, Markdown with IssueMentionCard)
 
-**NavigationAdapter:** Platform-agnostic routing interface. All shared components use `useNavigation()` — never import from `next/navigation` or `react-router-dom` directly.
-
-```typescript
-interface NavigationAdapter {
-  push(path: string): void;
-  replace(path: string): void;
-  back(): void;
-  pathname: string;
-  searchParams: URLSearchParams;
-  openInNewTab?: (path: string, title?: string) => void;  // Desktop: opens a tab
-  getShareableUrl?: (path: string) => string;              // Desktop: returns web URL
-}
-```
-
-Web provides `push`/`replace`/`back`/`pathname` via Next.js router. Desktop adds `openInNewTab` (creates a tab in the tab store) and `getShareableUrl` (returns `https://www.multica.ai{path}`). Shared components check `openInNewTab?.()` — if present use it, otherwise fall through to browser default behavior.
+**NavigationAdapter:** Platform-agnostic routing interface. All shared components use `useNavigation()` and `<AppLink>` — never import from `next/navigation` or `react-router-dom` directly. Optional methods (`openInNewTab`, `getShareableUrl`) are provided by desktop only; shared code checks their existence before calling.
 
 ### apps/web/ (Next.js App)
 
@@ -133,46 +119,19 @@ apps/web/
 └── components/       # App-level: web-providers.tsx, locale-sync, loading-indicator
 ```
 
-**`platform/navigation.tsx`** — `WebNavigationProvider` wrapping Next.js `useRouter`/`usePathname`. This is the only web-platform-specific file. Core initialization (API, auth, WS) is handled by `CoreProvider` in `packages/core/platform/`.
-
-**`components/web-providers.tsx`** — Composes `CoreProvider` + `WebNavigationProvider`, passes `onLogin`/`onLogout` callbacks for cookie management.
+**`platform/navigation.tsx`** — `WebNavigationProvider` wrapping Next.js `useRouter`/`usePathname`. The only web-platform-specific file remaining — core initialization is handled by `CoreProvider` in `packages/core/platform/`.
 
 ### apps/desktop/ (Electron App)
 
-Electron 39 + electron-vite + react-router-dom. Hash router (`#/issues/...`) since there's no server for pushState.
+Electron 39 + electron-vite + react-router-dom. Uses `createHashRouter` since there's no server for pushState.
 
-```
-apps/desktop/
-├── src/main/index.ts           # Electron main process (BrowserWindow, hiddenInset titlebar)
-├── src/preload/                # contextBridge for electron API
-├── src/renderer/src/
-│   ├── App.tsx                 # Root: ThemeProvider > CoreProvider > RouterProvider
-│   ├── router.tsx              # createHashRouter + TitleSync + route definitions with handle.title
-│   ├── globals.css             # Same shared imports as web + desktop sidebar override
-│   ├── components/
-│   │   ├── desktop-layout.tsx  # Custom layout: sidebar + tab bar + content area
-│   │   └── tab-bar.tsx         # Tab rendering (fixed-width, fade mask, hover-close)
-│   ├── hooks/
-│   │   ├── use-tab-sync.ts     # URL + document.title → tab store sync
-│   │   ├── use-document-title.ts  # Sets document.title (tab system observes via MutationObserver)
-│   │   └── use-history-stack.ts   # Back/forward navigation state
-│   ├── pages/
-│   │   ├── login.tsx           # Thin wrapper: traffic light spacer + shared LoginPage
-│   │   └── issue-detail-page.tsx  # useDocumentTitle for dynamic tab title
-│   ├── platform/
-│   │   └── navigation.tsx      # DesktopNavigationProvider (adapts react-router to NavigationAdapter)
-│   └── stores/
-│       └── tab-store.ts        # Zustand: tab open/close/switch/update
-├── electron.vite.config.ts     # Build config: externalize main/preload, react+tailwind for renderer
-├── electron-builder.yml        # Packaging config: dmg/zip (mac), nsis (win), AppImage/deb (linux)
-└── .env.production             # Production API/WS URLs (VITE_API_URL, VITE_WS_URL)
-```
+Desktop shares all page components from `@multica/views` — the router imports `IssuesPage`, `InboxPage`, `AgentsPage`, etc. directly. Desktop-specific code is limited to: layout shell (tab bar, traffic light region), navigation adapter, and page wrappers for dynamic `document.title`.
 
-**Desktop shares all pages from `@multica/views`** — IssuesPage, InboxPage, AgentsPage, SettingsPage, etc. are imported directly in the router. Desktop-specific code is only: tab system, layout shell, navigation adapter, and page wrappers for dynamic titles.
-
-**Tab system design:** `document.title` is the single source of truth for tab titles (same as browsers). Route definitions provide default titles via `handle: { title }`. Pages with dynamic data (e.g. issue detail) override via `useDocumentTitle()`. A MutationObserver on `<title>` syncs changes to the tab store automatically. No manual `resolveTabMeta()` mapping needed.
-
-**Environment variables:** `VITE_API_URL` and `VITE_WS_URL` are compiled into the bundle at build time (like `NEXT_PUBLIC_*` in Next.js). `.env.production` is loaded automatically by Vite during `pnpm build`. Dev mode falls back to `http://localhost:8080`.
+**Key conventions:**
+- New routes must include `handle: { title: "..." }` for automatic tab titles
+- Pages with dynamic titles (e.g. issue detail) use `useDocumentTitle(title)` to override
+- `platform/navigation.tsx` adapts react-router to `NavigationAdapter` — the only place that imports from `react-router-dom`
+- Environment variables (`VITE_API_URL`, `VITE_WS_URL`) are baked in at build time via `.env.production`
 
 ### State Management
 
