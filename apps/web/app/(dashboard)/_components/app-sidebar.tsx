@@ -66,6 +66,7 @@ const workspaceNav = [
   { href: "/agents", label: "Agents", icon: Bot },
   { href: "/runtimes", label: "Runtimes", icon: Monitor },
   { href: "/skills", label: "Skills", icon: BookOpenText },
+  { href: "/settings", label: "Settings", icon: Settings },
 ];
 
 function DraftDot() {
@@ -257,19 +258,7 @@ export function AppSidebar() {
         </SidebarContent>
 
         <SidebarFooter className="p-2">
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                isActive={pathname === "/settings"}
-                render={<Link href="/settings" />}
-                className="text-muted-foreground hover:not-data-active:bg-sidebar-accent/70 data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground"
-              >
-                <Settings />
-                <span>Settings</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
-          <div className="border-t pt-2 mt-1">
+          <div className="border-t pt-2">
             <div className="flex items-center gap-2.5 rounded-md px-2 py-1.5">
               <ActorAvatar
                 name={user?.name ?? ""}
