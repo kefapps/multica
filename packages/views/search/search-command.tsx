@@ -158,12 +158,6 @@ export function SearchCommand() {
         <CommandPrimitive
           shouldFilter={false}
           className="flex size-full flex-col overflow-hidden rounded-xl bg-popover text-popover-foreground"
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              e.preventDefault();
-              setOpen(false);
-            }
-          }}
         >
           {/* Search input */}
           <div className="flex items-center gap-3 border-b px-4 py-3">
@@ -172,6 +166,12 @@ export function SearchCommand() {
               placeholder="Type a command or search..."
               value={query}
               onValueChange={handleValueChange}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setOpen(false);
+                }
+              }}
               className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             />
             <kbd className="hidden shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground sm:inline">
