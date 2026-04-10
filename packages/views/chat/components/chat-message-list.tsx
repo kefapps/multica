@@ -77,7 +77,7 @@ function MessageBubble({
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="rounded-2xl bg-primary px-3.5 py-2 text-sm text-primary-foreground max-w-[85%]">
+        <div className="rounded-2xl bg-primary px-3.5 py-2 text-sm text-primary-foreground max-w-[85%] whitespace-pre-wrap break-words">
           {message.content}
         </div>
       </div>
