@@ -1,13 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Clock, Loader2, MessageSquare, SearchIcon } from "lucide-react";
+import { Clock, FolderKanban, Loader2, MessageSquare, SearchIcon } from "lucide-react";
 import { Command as CommandPrimitive } from "cmdk";
-import type { SearchIssueResult } from "@multica/core/types";
+import type { SearchIssueResult, SearchProjectResult } from "@multica/core/types";
 import { api } from "@multica/core/api";
 import { useRecentIssuesStore } from "@multica/core/issues/stores";
 import { StatusIcon } from "../issues/components";
 import { STATUS_CONFIG } from "@multica/core/issues/config";
+import { PROJECT_STATUS_CONFIG } from "@multica/core/projects/config";
+import type { ProjectStatus } from "@multica/core/types";
 import {
   Dialog,
   DialogContent,
@@ -54,16 +56,23 @@ function HighlightText({ text, query }: { text: string; query: string }) {
   );
 }
 
+interface SearchResults {
+  issues: SearchIssueResult[];
+  projects: SearchProjectResult[];
+}
+
 export function SearchCommand() {
   const { push } = useNavigation();
   const open = useSearchStore((s) => s.open);
   const setOpen = useSearchStore((s) => s.setOpen);
   const recentIssues = useRecentIssuesStore((s) => s.items);
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<SearchIssueResult[]>([]);
+  const [results, setResults] = useState<SearchResults>({ issues: [], projects: [] });
   const [isLoading, setIsLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  const hasResults = results.issues.length > 0 || results.projects.length > 0;
 
   // Global Cmd+K / Ctrl+K shortcut
   useEffect(() => {
@@ -103,7 +112,7 @@ export function SearchCommand() {
   useEffect(() => {
     if (!open) {
       setQuery("");
-      setResults([]);
+      setResults({ issues: [], projects: [] });
       setIsLoading(false);
     }
   }, [open]);
@@ -113,7 +122,7 @@ export function SearchCommand() {
     if (abortRef.current) abortRef.current.abort();
 
     if (!q.trim()) {
-      setResults([]);
+      setResults({ issues: [], projects: [] });
       setIsLoading(false);
       return;
     }
@@ -123,14 +132,25 @@ export function SearchCommand() {
       const controller = new AbortController();
       abortRef.current = controller;
       try {
-        const res = await api.searchIssues({
-          q: q.trim(),
-          limit: 20,
-          include_closed: true,
-          signal: controller.signal,
-        });
+        const [issueRes, projectRes] = await Promise.all([
+          api.searchIssues({
+            q: q.trim(),
+            limit: 20,
+            include_closed: true,
+            signal: controller.signal,
+          }),
+          api.searchProjects({
+            q: q.trim(),
+            limit: 10,
+            include_closed: true,
+            signal: controller.signal,
+          }),
+        ]);
         if (!controller.signal.aborted) {
-          setResults(res.issues);
+          setResults({
+            issues: issueRes.issues,
+            projects: projectRes.projects,
+          });
           setIsLoading(false);
         }
       } catch {
@@ -150,11 +170,15 @@ export function SearchCommand() {
   );
 
   const handleSelect = useCallback(
-    (issueId: string) => {
+    (value: string) => {
       setOpen(false);
-      push(`/issues/${issueId}`);
+      if (value.startsWith("project:")) {
+        push(`/projects/${value.slice(8)}`);
+      } else {
+        push(`/issues/${value}`);
+      }
     },
-    [push],
+    [push, setOpen],
   );
 
   return (
@@ -164,9 +188,9 @@ export function SearchCommand() {
         showCloseButton={false}
       >
         <DialogHeader className="sr-only">
-          <DialogTitle>Search Issues</DialogTitle>
+          <DialogTitle>Search</DialogTitle>
           <DialogDescription>
-            Search issues by title, description, or comments
+            Search issues and projects by title or description
           </DialogDescription>
         </DialogHeader>
         <CommandPrimitive
@@ -195,15 +219,59 @@ export function SearchCommand() {
               </div>
             )}
 
-            {!isLoading && query.trim() && results.length === 0 && (
+            {!isLoading && query.trim() && !hasResults && (
               <CommandPrimitive.Empty className="py-10 text-center text-sm text-muted-foreground">
-                No issues found.
+                No results found.
               </CommandPrimitive.Empty>
             )}
 
-            {!isLoading && results.length > 0 && (
-              <CommandPrimitive.Group className="p-2">
-                {results.map((issue) => (
+            {!isLoading && results.projects.length > 0 && (
+              <CommandPrimitive.Group
+                heading="Projects"
+                className="p-2 [&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground"
+              >
+                {results.projects.map((project) => (
+                  <CommandPrimitive.Item
+                    key={`project:${project.id}`}
+                    value={`project:${project.id}`}
+                    onSelect={handleSelect}
+                    className="flex cursor-default select-none flex-col gap-1 rounded-lg px-3 py-2.5 text-sm outline-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-selected:bg-accent"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span className="size-4 shrink-0 text-center text-sm leading-4">
+                        {project.icon || <FolderKanban className="size-4 text-muted-foreground" />}
+                      </span>
+                      <span className="truncate">
+                        <HighlightText text={project.title} query={query} />
+                      </span>
+                      <span
+                        className={`ml-auto text-xs shrink-0 ${PROJECT_STATUS_CONFIG[project.status as ProjectStatus]?.color ?? "text-muted-foreground"}`}
+                      >
+                        {PROJECT_STATUS_CONFIG[project.status as ProjectStatus]?.label ?? project.status}
+                      </span>
+                    </div>
+                    {project.match_source === "description" &&
+                      project.matched_snippet && (
+                        <div className="flex items-start gap-2 pl-[26px]">
+                          <span className="text-xs text-muted-foreground truncate">
+                            <HighlightText
+                              text={project.matched_snippet}
+                              query={query}
+                            />
+                          </span>
+                        </div>
+                      )}
+                  </CommandPrimitive.Item>
+                ))}
+              </CommandPrimitive.Group>
+            )}
+
+            {!isLoading && results.issues.length > 0 && (
+              <CommandPrimitive.Group
+                heading="Issues"
+                className="p-2 [&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground"
+              >
+                {results.issues.map((issue) => (
                   <CommandPrimitive.Item
                     key={issue.id}
                     value={issue.id}
@@ -277,7 +345,7 @@ export function SearchCommand() {
 
             {!isLoading && !query.trim() && recentIssues.length === 0 && (
               <div className="flex flex-col items-center gap-2 py-10 text-sm text-muted-foreground">
-                <span>Type to search issues...</span>
+                <span>Type to search issues and projects...</span>
                 <span className="text-xs">Press <kbd className="rounded bg-muted px-1.5 py-0.5 font-medium">⌘K</kbd> to open this anytime</span>
               </div>
             )}
