@@ -129,16 +129,31 @@ type openclawEventResult struct {
 
 // processOutput reads the JSON output from openclaw --json stderr and returns
 // the parsed result. OpenClaw writes its JSON result to stderr, which may also
-// contain non-JSON log lines. We extract the JSON object by finding the first '{'.
+// contain non-JSON log lines. We find the result JSON by trying each '{' until
+// one successfully unmarshals as an openclawResult with payloads.
 func (b *openclawBackend) processOutput(r io.Reader, ch chan<- Message) openclawEventResult {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return openclawEventResult{status: "failed", errMsg: fmt.Sprintf("read stderr: %v", err)}
 	}
 
-	// Log non-JSON lines and find the JSON object
 	raw := string(data)
-	jsonStart := strings.Index(raw, "{")
+
+	// Try each '{' position until we find valid openclawResult JSON.
+	// Earlier '{' chars may appear in log/error lines (e.g. raw_params={...}).
+	var result openclawResult
+	jsonStart := -1
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '{' {
+			continue
+		}
+		if err := json.Unmarshal([]byte(raw[i:]), &result); err == nil && result.Payloads != nil {
+			jsonStart = i
+			break
+		}
+	}
+
+	// Log non-JSON lines before the result
 	if jsonStart > 0 {
 		for _, line := range strings.Split(raw[:jsonStart], "\n") {
 			line = strings.TrimSpace(line)
@@ -148,13 +163,7 @@ func (b *openclawBackend) processOutput(r io.Reader, ch chan<- Message) openclaw
 		}
 	}
 
-	var result openclawResult
-	jsonData := raw
-	if jsonStart >= 0 {
-		jsonData = raw[jsonStart:]
-	}
-	if err := json.Unmarshal([]byte(jsonData), &result); err != nil {
-		// If we can't parse JSON, return raw output as-is
+	if jsonStart < 0 {
 		trimmed := strings.TrimSpace(raw)
 		if trimmed != "" {
 			b.cfg.Logger.Debug("[openclaw:stderr] " + trimmed)

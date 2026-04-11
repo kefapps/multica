@@ -203,6 +203,32 @@ func TestOpenclawProcessOutputReadError(t *testing.T) {
 	close(ch)
 }
 
+func TestOpenclawProcessOutputWithBracesInLogLines(t *testing.T) {
+	t.Parallel()
+
+	b := &openclawBackend{cfg: Config{Logger: slog.Default()}}
+	ch := make(chan Message, 256)
+
+	result := openclawResult{
+		Payloads: []openclawPayload{{Text: "Final answer"}},
+		Meta:     openclawMeta{DurationMs: 500},
+	}
+	data, _ := json.Marshal(result)
+	// Simulate error line containing braces before the real JSON (the exact bug scenario)
+	input := `[tools] exec failed: complex interpreter invocation detected. raw_params={"command":"echo hello"}` + "\n" + string(data)
+
+	res := b.processOutput(strings.NewReader(input), ch)
+
+	if res.status != "completed" {
+		t.Errorf("status: got %q, want %q", res.status, "completed")
+	}
+	if res.output != "Final answer" {
+		t.Errorf("output: got %q, want %q", res.output, "Final answer")
+	}
+
+	close(ch)
+}
+
 // ── openclawInt64 tests ──
 
 func TestOpenclawInt64Float(t *testing.T) {
