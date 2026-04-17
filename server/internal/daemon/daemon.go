@@ -1218,14 +1218,14 @@ func (d *Daemon) fetchInitialTaskContextData(ctx context.Context, task Task, tas
 	defer cancel()
 
 	var issueData map[string]any
-	if issue, err := d.client.GetIssueData(readCtx, task.IssueID); err != nil {
+	if issue, err := d.client.GetIssueData(readCtx, task.WorkspaceID, task.IssueID); err != nil {
 		taskLog.Warn("initial issue fetch failed, continuing with minimal context", "error", err)
 	} else {
 		issueData = issue
 	}
 
 	var commentsData []map[string]any
-	if comments, err := d.client.ListIssueCommentsData(readCtx, task.IssueID, 100); err != nil {
+	if comments, err := d.client.ListIssueCommentsData(readCtx, task.WorkspaceID, task.IssueID, 100); err != nil {
 		taskLog.Warn("initial comments fetch failed, continuing with empty comments context", "error", err)
 	} else {
 		commentsData = comments

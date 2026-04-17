@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -135,6 +136,59 @@ func TestIsWorkspaceNotFoundError(t *testing.T) {
 
 	if isWorkspaceNotFoundError(&requestError{StatusCode: http.StatusInternalServerError, Body: `{"error":"workspace not found"}`}) {
 		t.Fatal("did not expect 500 to be treated as workspace not found")
+	}
+}
+
+func TestClientGetIssueDataIncludesWorkspaceID(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("workspace_id"); got != "ws-123" {
+			t.Fatalf("expected workspace_id=ws-123, got %q", got)
+		}
+		if r.URL.Path != "/api/issues/issue-1" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "issue-1"})
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL)
+	issue, err := client.GetIssueData(context.Background(), "ws-123", "issue-1")
+	if err != nil {
+		t.Fatalf("GetIssueData returned error: %v", err)
+	}
+	if got := issue["id"]; got != "issue-1" {
+		t.Fatalf("expected issue id issue-1, got %v", got)
+	}
+}
+
+func TestClientListIssueCommentsDataIncludesWorkspaceID(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("workspace_id"); got != "ws-123" {
+			t.Fatalf("expected workspace_id=ws-123, got %q", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "7" {
+			t.Fatalf("expected limit=7, got %q", got)
+		}
+		if r.URL.Path != "/api/issues/issue-1/comments" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "comment-1"}})
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL)
+	comments, err := client.ListIssueCommentsData(context.Background(), "ws-123", "issue-1", 7)
+	if err != nil {
+		t.Fatalf("ListIssueCommentsData returned error: %v", err)
+	}
+	if len(comments) != 1 || comments[0]["id"] != "comment-1" {
+		t.Fatalf("unexpected comments payload: %+v", comments)
 	}
 }
 
