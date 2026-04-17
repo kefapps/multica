@@ -192,6 +192,102 @@ func TestClientListIssueCommentsDataIncludesWorkspaceID(t *testing.T) {
 	}
 }
 
+func TestClientListWorkspacesIncludesRepos(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspaces" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id":   "ws-1",
+				"name": "kefapps",
+				"repos": []map[string]any{
+					{"url": "https://github.com/kefapps/roundtable", "description": "Roundtable"},
+					{"url": "https://github.com/kefapps/multica", "description": "Multica"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL)
+	workspaces, err := client.ListWorkspaces(context.Background())
+	if err != nil {
+		t.Fatalf("ListWorkspaces returned error: %v", err)
+	}
+	if len(workspaces) != 1 {
+		t.Fatalf("expected 1 workspace, got %d", len(workspaces))
+	}
+	if len(workspaces[0].Repos) != 2 {
+		t.Fatalf("expected 2 repos, got %d", len(workspaces[0].Repos))
+	}
+	if workspaces[0].Repos[1].URL != "https://github.com/kefapps/multica" {
+		t.Fatalf("unexpected repo payload: %+v", workspaces[0].Repos)
+	}
+}
+
+func TestSyncWorkspacesFromAPIUpdatesReposForExistingWorkspace(t *testing.T) {
+	t.Parallel()
+
+	var registerCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspaces":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id":   "ws-1",
+					"name": "kefapps",
+					"repos": []map[string]any{
+						{"url": "https://github.com/kefapps/roundtable", "description": "Roundtable"},
+						{"url": "https://github.com/kefapps/multica", "description": "Multica"},
+					},
+				},
+			})
+		case "/api/daemon/register":
+			registerCalls.Add(1)
+			t.Fatal("did not expect register to be called for an existing workspace")
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	d := &Daemon{
+		client: NewClient(srv.URL),
+		logger: slog.Default(),
+		workspaces: map[string]*workspaceState{
+			"ws-1": {
+				workspaceID: "ws-1",
+				runtimeIDs:  []string{"rt-1"},
+				repos: []RepoData{
+					{URL: "https://github.com/kefapps/roundtable", Description: "Roundtable"},
+				},
+			},
+		},
+		runtimeIndex: map[string]Runtime{
+			"rt-1": {ID: "rt-1", Provider: "codex", Status: "online"},
+		},
+	}
+
+	if err := d.syncWorkspacesFromAPI(context.Background()); err != nil {
+		t.Fatalf("syncWorkspacesFromAPI returned error: %v", err)
+	}
+	if registerCalls.Load() != 0 {
+		t.Fatalf("expected 0 register calls, got %d", registerCalls.Load())
+	}
+	got := d.workspaces["ws-1"].repos
+	if len(got) != 2 {
+		t.Fatalf("expected repos to be updated to 2 entries, got %+v", got)
+	}
+	if got[1].URL != "https://github.com/kefapps/multica" {
+		t.Fatalf("expected multica repo in workspace state, got %+v", got)
+	}
+}
+
 func TestMergeUsage(t *testing.T) {
 	t.Parallel()
 

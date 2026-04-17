@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
@@ -99,7 +100,8 @@ func prepareCodexHome(params CodexHomeParams) error {
 		overlaySource = ""
 	}
 
-	configBytes, err := renderCodexConfig(overlay)
+	writableRoots := computeCodexWritableRoots(params.WorkspacesRoot, params.WorkspaceID, params.Repos)
+	configBytes, err := renderCodexConfig(writableRoots, overlay)
 	if err != nil {
 		return fmt.Errorf("render codex config: %w", err)
 	}
@@ -116,12 +118,13 @@ func prepareCodexHome(params CodexHomeParams) error {
 		"codex_home", params.CodexHome,
 		"config_source", configSource,
 		"overlay_source", overlaySource,
+		"writable_roots", writableRoots,
 	)
 
 	return nil
 }
 
-func renderCodexConfig(overlay string) ([]byte, error) {
+func renderCodexConfig(writableRoots []string, overlay string) ([]byte, error) {
 	base := map[string]any{
 		"sandbox_mode": "workspace-write",
 		"codex_hooks":  false,
@@ -138,7 +141,107 @@ func renderCodexConfig(overlay string) ([]byte, error) {
 		mergeTOMLMap(base, overlayMap)
 	}
 
+	if len(writableRoots) > 0 {
+		sandboxCfg, ok := base["sandbox_workspace_write"].(map[string]any)
+		if !ok || sandboxCfg == nil {
+			sandboxCfg = map[string]any{}
+			base["sandbox_workspace_write"] = sandboxCfg
+		}
+		sandboxCfg["writable_roots"] = mergeWritableRoots(sandboxCfg["writable_roots"], writableRoots)
+	}
+
 	return toml.Marshal(base)
+}
+
+func computeCodexWritableRoots(workspacesRoot, workspaceID string, repos []RepoContextForEnv) []string {
+	if workspacesRoot == "" || workspaceID == "" || len(repos) == 0 {
+		return nil
+	}
+
+	cacheRoot := filepath.Join(workspacesRoot, ".repos")
+	seen := make(map[string]struct{}, len(repos))
+	roots := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		if strings.TrimSpace(repo.URL) == "" {
+			continue
+		}
+		for _, root := range []string{
+			repocache.BareRepoDir(cacheRoot, workspaceID, repo.URL),
+			repocache.WorktreeAdminDir(cacheRoot, workspaceID, repo.URL),
+		} {
+			if _, ok := seen[root]; ok {
+				continue
+			}
+			seen[root] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
+	sort.Strings(roots)
+	return roots
+}
+
+func mergeWritableRoots(existing any, required []string) []string {
+	if len(required) == 0 {
+		return stringSliceFromAny(existing)
+	}
+
+	seen := make(map[string]struct{}, len(required))
+	merged := make([]string, 0, len(required))
+	for _, root := range stringSliceFromAny(existing) {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		if _, ok := seen[root]; ok {
+			continue
+		}
+		seen[root] = struct{}{}
+		merged = append(merged, root)
+	}
+	for _, root := range required {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		if _, ok := seen[root]; ok {
+			continue
+		}
+		seen[root] = struct{}{}
+		merged = append(merged, root)
+	}
+	sort.Strings(merged)
+	return merged
+}
+
+func stringSliceFromAny(v any) []string {
+	switch raw := v.(type) {
+	case nil:
+		return nil
+	case []string:
+		out := make([]string, 0, len(raw))
+		for _, item := range raw {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(raw))
+		for _, item := range raw {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func mergeTOMLMap(dst, src map[string]any) {

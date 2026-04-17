@@ -215,10 +215,11 @@ func (c *Client) ReportUpdateResult(ctx context.Context, runtimeID, updateID str
 	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/update/%s/result", runtimeID, updateID), result, nil)
 }
 
-// WorkspaceInfo holds minimal workspace metadata returned by the API.
+// WorkspaceInfo holds workspace metadata returned by the API.
 type WorkspaceInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID    string     `json:"id"`
+	Name  string     `json:"name"`
+	Repos []RepoData `json:"repos"`
 }
 
 // ListWorkspaces fetches all workspaces the authenticated user belongs to.

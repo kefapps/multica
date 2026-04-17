@@ -22,6 +22,7 @@ import (
 type workspaceState struct {
 	workspaceID string
 	runtimeIDs  []string
+	repos       []RepoData
 }
 
 // Daemon is the local agent runtime that polls for and executes tasks.
@@ -256,26 +257,46 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context) error {
 		return fmt.Errorf("list workspaces: %w", err)
 	}
 
-	apiIDs := make(map[string]string, len(workspaces)) // id -> name
+	apiWorkspaces := make(map[string]WorkspaceInfo, len(workspaces))
 	for _, ws := range workspaces {
-		apiIDs[ws.ID] = ws.Name
+		apiWorkspaces[ws.ID] = ws
 	}
 
 	d.mu.Lock()
-	currentIDs := make(map[string]bool, len(d.workspaces))
-	for id := range d.workspaces {
-		currentIDs[id] = true
+	currentStates := make(map[string]workspaceState, len(d.workspaces))
+	for id, ws := range d.workspaces {
+		currentStates[id] = workspaceState{
+			workspaceID: ws.workspaceID,
+			runtimeIDs:  append([]string(nil), ws.runtimeIDs...),
+			repos:       cloneRepoData(ws.repos),
+		}
 	}
 	d.mu.Unlock()
 
 	var registered int
-	for id, name := range apiIDs {
-		if currentIDs[id] {
+	for id, ws := range apiWorkspaces {
+		if current, ok := currentStates[id]; ok {
+			if !repoDataEquivalent(current.repos, ws.Repos) {
+				repos := cloneRepoData(ws.Repos)
+				d.mu.Lock()
+				if tracked := d.workspaces[id]; tracked != nil {
+					tracked.repos = cloneRepoData(repos)
+				}
+				d.mu.Unlock()
+				if d.repoCache != nil {
+					go func(wsID string, repos []RepoData) {
+						if err := d.repoCache.Sync(wsID, repoDataToInfo(repos)); err != nil {
+							d.logger.Warn("repo cache sync failed after workspace repo update", "workspace_id", wsID, "error", err)
+						}
+					}(id, repos)
+				}
+				d.logger.Info("workspace repos updated", "workspace_id", id, "name", ws.Name, "repo_count", len(repos))
+			}
 			continue
 		}
 		resp, err := d.registerRuntimesForWorkspace(ctx, id)
 		if err != nil {
-			d.logger.Error("failed to register runtimes", "workspace_id", id, "name", name, "error", err)
+			d.logger.Error("failed to register runtimes", "workspace_id", id, "name", ws.Name, "error", err)
 			continue
 		}
 		runtimeIDs := make([]string, len(resp.Runtimes))
@@ -283,8 +304,9 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context) error {
 			runtimeIDs[i] = rt.ID
 			d.logger.Info("registered runtime", "workspace_id", id, "runtime_id", rt.ID, "provider", rt.Provider)
 		}
+		repos := cloneRepoData(resp.Repos)
 		d.mu.Lock()
-		d.workspaces[id] = &workspaceState{workspaceID: id, runtimeIDs: runtimeIDs}
+		d.workspaces[id] = &workspaceState{workspaceID: id, runtimeIDs: runtimeIDs, repos: repos}
 		for _, rt := range resp.Runtimes {
 			d.runtimeIndex[rt.ID] = rt
 		}
@@ -298,13 +320,13 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context) error {
 			}(id, resp.Repos)
 		}
 
-		d.logger.Info("watching workspace", "workspace_id", id, "name", name, "runtimes", len(resp.Runtimes))
+		d.logger.Info("watching workspace", "workspace_id", id, "name", ws.Name, "runtimes", len(resp.Runtimes))
 		registered++
 	}
 
 	// Remove workspaces the user no longer belongs to.
-	for id := range currentIDs {
-		if _, ok := apiIDs[id]; !ok {
+	for id := range currentStates {
+		if _, ok := apiWorkspaces[id]; !ok {
 			d.mu.Lock()
 			if ws, exists := d.workspaces[id]; exists {
 				for _, rid := range ws.runtimeIDs {
@@ -1270,6 +1292,35 @@ func repoDataToInfo(repos []RepoData) []repocache.RepoInfo {
 		info[i] = repocache.RepoInfo{URL: r.URL, Description: r.Description}
 	}
 	return info
+}
+
+func cloneRepoData(repos []RepoData) []RepoData {
+	if len(repos) == 0 {
+		return nil
+	}
+	cloned := make([]RepoData, len(repos))
+	copy(cloned, repos)
+	return cloned
+}
+
+func repoDataEquivalent(a, b []RepoData) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	seen := make(map[string]string, len(a))
+	for _, repo := range a {
+		seen[repo.URL] = repo.Description
+	}
+	for _, repo := range b {
+		desc, ok := seen[repo.URL]
+		if !ok || desc != repo.Description {
+			return false
+		}
+	}
+	return true
 }
 
 func convertReposForEnv(repos []RepoData) []execenv.RepoContextForEnv {

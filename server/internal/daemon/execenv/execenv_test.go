@@ -830,7 +830,7 @@ func TestPrepareCodexHomeSkipsMissingFiles(t *testing.T) {
 
 func TestRenderCodexConfigCreatesDefault(t *testing.T) {
 	t.Parallel()
-	data, err := renderCodexConfig("")
+	data, err := renderCodexConfig(nil, "")
 	if err != nil {
 		t.Fatalf("renderCodexConfig failed: %v", err)
 	}
@@ -851,7 +851,7 @@ func TestRenderCodexConfigCreatesDefault(t *testing.T) {
 
 func TestRenderCodexConfigAppliesOverlay(t *testing.T) {
 	t.Parallel()
-	data, err := renderCodexConfig(`
+	data, err := renderCodexConfig(nil, `
 model_reasoning_effort = "high"
 
 [sandbox_workspace_write]
@@ -872,6 +872,38 @@ allow_commands = ["git"]
 	}
 	if !strings.Contains(s, "allow_commands") || !strings.Contains(s, "git") {
 		t.Error("lost overlay allow_commands")
+	}
+}
+
+func TestRenderCodexConfigAddsWritableRoots(t *testing.T) {
+	t.Parallel()
+	data, err := renderCodexConfig([]string{"/tmp/repo.git", "/tmp/repo.git/worktrees/repo"}, "")
+	if err != nil {
+		t.Fatalf("renderCodexConfig failed: %v", err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "writable_roots") || !strings.Contains(s, "/tmp/repo.git") || !strings.Contains(s, "/tmp/repo.git/worktrees/repo") {
+		t.Fatalf("config.toml missing writable_roots: %s", s)
+	}
+}
+
+func TestRenderCodexConfigMergesOverlayWritableRoots(t *testing.T) {
+	t.Parallel()
+	data, err := renderCodexConfig([]string{"/tmp/repo.git", "/tmp/repo.git/worktrees/repo"}, `
+[sandbox_workspace_write]
+writable_roots = ["/tmp/custom-root"]
+`)
+	if err != nil {
+		t.Fatalf("renderCodexConfig failed: %v", err)
+	}
+	s := string(data)
+	for _, required := range []string{"/tmp/repo.git", "/tmp/repo.git/worktrees/repo"} {
+		if !strings.Contains(s, required) {
+			t.Fatalf("config.toml missing required repo writable root %q: %s", required, s)
+		}
+	}
+	if !strings.Contains(s, "/tmp/custom-root") {
+		t.Fatalf("config.toml missing overlay writable root: %s", s)
 	}
 }
 
@@ -932,6 +964,14 @@ allow_commands = ["git"]
 	}
 	if !strings.Contains(s, "allow_commands") || !strings.Contains(s, "git") {
 		t.Fatalf("config.toml missing repo overlay allow_commands: %s", s)
+	}
+	for _, expectedRoot := range []string{
+		repocache.BareRepoDir(filepath.Join(workspacesRoot, ".repos"), "ws-overlay", sourceRepo),
+		repocache.WorktreeAdminDir(filepath.Join(workspacesRoot, ".repos"), "ws-overlay", sourceRepo),
+	} {
+		if !strings.Contains(s, expectedRoot) {
+			t.Fatalf("config.toml missing repo writable root %q: %s", expectedRoot, s)
+		}
 	}
 }
 

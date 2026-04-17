@@ -66,6 +66,24 @@ func TestBareDirName(t *testing.T) {
 	}
 }
 
+func TestWorktreeAdminDir(t *testing.T) {
+	t.Parallel()
+	got := WorktreeAdminDir("/tmp/cache", "ws-1", "https://github.com/org/my-repo.git")
+	want := filepath.Join("/tmp/cache", "ws-1", "my-repo.git", "worktrees", "my-repo")
+	if got != want {
+		t.Fatalf("WorktreeAdminDir() = %q, want %q", got, want)
+	}
+}
+
+func TestBareRepoDir(t *testing.T) {
+	t.Parallel()
+	got := BareRepoDir("/tmp/cache", "ws-1", "https://github.com/org/my-repo.git")
+	want := filepath.Join("/tmp/cache", "ws-1", "my-repo.git")
+	if got != want {
+		t.Fatalf("BareRepoDir() = %q, want %q", got, want)
+	}
+}
+
 func TestIsBareRepo(t *testing.T) {
 	t.Parallel()
 

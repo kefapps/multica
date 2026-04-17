@@ -113,11 +113,25 @@ func (c *Cache) Sync(workspaceID string, repos []RepoInfo) error {
 // Lookup returns the local bare clone path for a repo URL within a workspace.
 // Returns "" if not cached.
 func (c *Cache) Lookup(workspaceID, url string) string {
-	barePath := filepath.Join(c.root, workspaceID, bareDirName(url))
+	barePath := BareRepoDir(c.root, workspaceID, url)
 	if isBareRepo(barePath) {
 		return barePath
 	}
 	return ""
+}
+
+// BareRepoDir returns the deterministic bare-repo path inside the cache for a
+// given workspace and remote URL, regardless of whether the bare clone already
+// exists on disk.
+func BareRepoDir(cacheRoot, workspaceID, url string) string {
+	return filepath.Join(cacheRoot, workspaceID, bareDirName(url))
+}
+
+// WorktreeAdminDir returns the bare-repo admin directory git uses to track the
+// per-worktree metadata for a repo checkout created by CreateWorktree.
+// The path is deterministic from the cache root, workspace, and repo URL.
+func WorktreeAdminDir(cacheRoot, workspaceID, url string) string {
+	return filepath.Join(BareRepoDir(cacheRoot, workspaceID, url), "worktrees", repoNameFromURL(url))
 }
 
 // Fetch runs `git fetch origin` on a cached bare clone to get latest refs.
