@@ -428,10 +428,16 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
 
-	// Verify the caller owns this runtime's workspace.
-	if _, ok := h.requireDaemonRuntimeAccess(w, r, runtimeID); !ok {
+	// Verify the caller owns this runtime's workspace. The runtime's
+	// workspace_id is used below as the authoritative value a claimed task
+	// must match — a task whose resolved workspace doesn't equal this
+	// runtime's workspace is rejected even if it was enqueued against this
+	// runtime_id (defense-in-depth against upstream routing bugs).
+	runtime, ok := h.requireDaemonRuntimeAccess(w, r, runtimeID)
+	if !ok {
 		return
 	}
+	runtimeWorkspaceID := uuidToString(runtime.WorkspaceID)
 
 	task, err := h.TaskService.ClaimTaskForRuntime(r.Context(), parseUUID(runtimeID))
 	if err != nil {
@@ -471,24 +477,40 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Workspace ID is mandatory — the daemon uses it to scope the work env and
-	// the agent CLI uses it as the only source of truth for every subsequent
-	// API call. Resolving via the service layer also covers autopilot tasks
-	// (neither IssueID nor ChatSessionID set). If we can't determine the
-	// workspace, fail loudly rather than ship an empty value that would let
-	// the agent fall back to a stale/foreign workspace.
-	resp.WorkspaceID = h.TaskService.ResolveTaskWorkspaceID(r.Context(), *task)
-	if resp.WorkspaceID == "" {
-		slog.Error("task claim: unresolvable workspace, rejecting",
+	// Workspace ID is mandatory — the daemon uses it to scope the work env
+	// and the agent CLI uses it as the only source of truth for every
+	// subsequent API call. Resolving via the service layer also covers
+	// autopilot tasks (neither IssueID nor ChatSessionID set).
+	//
+	// Beyond "non-empty", we enforce equality with the runtime's workspace:
+	// a task whose resolved workspace doesn't match the runtime it was
+	// dispatched to has been misrouted (data integrity bug upstream) and
+	// must not run here. Either case is a hard failure.
+	//
+	// The task was atomically transitioned to 'dispatched' by
+	// ClaimTaskForRuntime above; simply returning an error would leave it
+	// in that state (and the agent in 'working') until the stale-task
+	// sweeper picks it up minutes later. Cancel it explicitly so the queue
+	// and agent status are released immediately.
+	resolvedWorkspaceID := h.TaskService.ResolveTaskWorkspaceID(r.Context(), *task)
+	if resolvedWorkspaceID == "" || resolvedWorkspaceID != runtimeWorkspaceID {
+		slog.Error("task claim: workspace isolation check failed, cancelling task",
 			"task_id", uuidToString(task.ID),
 			"runtime_id", runtimeID,
+			"runtime_workspace", runtimeWorkspaceID,
+			"resolved_workspace", resolvedWorkspaceID,
 			"has_issue", task.IssueID.Valid,
 			"has_chat", task.ChatSessionID.Valid,
 			"has_autopilot_run", task.AutopilotRunID.Valid,
 		)
-		writeError(w, http.StatusInternalServerError, "cannot resolve workspace for task")
+		if _, cerr := h.TaskService.CancelTask(r.Context(), task.ID); cerr != nil {
+			slog.Error("task claim: cancel after workspace check failed",
+				"task_id", uuidToString(task.ID), "error", cerr)
+		}
+		writeError(w, http.StatusInternalServerError, "task workspace isolation check failed")
 		return
 	}
+	resp.WorkspaceID = resolvedWorkspaceID
 
 	// Load repos for the resolved workspace so the daemon can set up worktrees.
 	if ws, err := h.Queries.GetWorkspace(r.Context(), parseUUID(resp.WorkspaceID)); err == nil && ws.Repos != nil {

@@ -724,3 +724,83 @@ func TestClaimTaskByRuntime_AutopilotTaskCarriesWorkspace(t *testing.T) {
 		t.Fatalf("ClaimTaskByRuntime: expected task id=%s, got %q", taskID, resp.ID)
 	}
 }
+
+// TestClaimTaskByRuntime_TaskWorkspaceMismatch_CancelsAndRejects verifies
+// the defense-in-depth check in ClaimTaskByRuntime: if a task is somehow
+// dispatched to a runtime whose workspace doesn't match the task's
+// resolved workspace (upstream routing / data-integrity bug), the handler
+// must 500 AND cancel the dispatched task so it doesn't sit in
+// 'dispatched' until the 5-minute sweeper — which would also leave the
+// agent stuck reporting 'working' in the UI.
+func TestClaimTaskByRuntime_TaskWorkspaceMismatch_CancelsAndRejects(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+
+	// Local agent/runtime (belongs to testWorkspace).
+	var localAgentID, localRuntimeID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT id, runtime_id FROM agent WHERE workspace_id = $1 LIMIT 1`,
+		testWorkspaceID,
+	).Scan(&localAgentID, &localRuntimeID); err != nil {
+		t.Fatalf("setup: get local agent: %v", err)
+	}
+
+	// Foreign workspace with its own issue — what the misrouted task will
+	// resolve to.
+	var foreignWorkspaceID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO workspace (name, slug, description, issue_prefix)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id
+	`, "Mismatch Foreign", "mismatch-foreign-claim", "", "MFC").Scan(&foreignWorkspaceID); err != nil {
+		t.Fatalf("setup: create foreign workspace: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM workspace WHERE id = $1`, foreignWorkspaceID) })
+
+	var foreignIssueID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position)
+		VALUES ($1, 'mismatch-foreign-issue', 'todo', 'medium', $2, 'member', 77001, 0)
+		RETURNING id
+	`, foreignWorkspaceID, testUserID).Scan(&foreignIssueID); err != nil {
+		t.Fatalf("setup: create foreign issue: %v", err)
+	}
+
+	// Construct the inconsistent task: runtime_id belongs to testWorkspace,
+	// but issue_id is in foreignWorkspace. This is the data shape a routing
+	// bug would produce.
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority)
+		VALUES ($1, $2, $3, 'queued', 2)
+		RETURNING id
+	`, localAgentID, localRuntimeID, foreignIssueID).Scan(&taskID); err != nil {
+		t.Fatalf("setup: create mismatched task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID) })
+
+	w := httptest.NewRecorder()
+	req := newDaemonTokenRequest("POST", "/api/daemon/runtimes/"+localRuntimeID+"/claim-task", nil,
+		testWorkspaceID, "legit-daemon")
+	req = withURLParam(req, "runtimeId", localRuntimeID)
+
+	testHandler.ClaimTaskByRuntime(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("ClaimTaskByRuntime (mismatch): expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Task must NOT remain dispatched — it has to be cancelled so the agent
+	// is released immediately rather than stuck until the sweeper fires.
+	var status string
+	if err := testPool.QueryRow(ctx,
+		`SELECT status FROM agent_task_queue WHERE id = $1`, taskID,
+	).Scan(&status); err != nil {
+		t.Fatalf("read task status: %v", err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("ClaimTaskByRuntime (mismatch): expected task status=cancelled, got %q", status)
+	}
+}
