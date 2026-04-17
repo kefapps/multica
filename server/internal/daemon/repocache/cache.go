@@ -300,6 +300,10 @@ func (c *Cache) CreateWorktree(params WorktreeParams) (*WorktreeResult, error) {
 		return nil, fmt.Errorf("repo not found in cache: %s (workspace: %s)", params.RepoURL, params.WorkspaceID)
 	}
 
+	// Derive directory name from repo URL.
+	dirName := repoNameFromURL(params.RepoURL)
+	worktreePath := filepath.Join(params.WorkDir, dirName)
+
 	// Serialize concurrent CreateWorktree calls on the same bare repo. Git's
 	// own lockfiles (packed-refs.lock, config.lock, worktree admin dirs)
 	// can't tolerate parallel fetch + worktree mutations on the same repo.
@@ -311,6 +315,18 @@ func (c *Cache) CreateWorktree(params WorktreeParams) (*WorktreeResult, error) {
 		c.logger.Warn("repo checkout: worktree prune failed before checkout",
 			"url", params.RepoURL,
 			"error", err,
+		)
+	}
+	if removed, err := cleanupCompletedTaskWorktrees(barePath, worktreePath, c.logger); err != nil {
+		c.logger.Warn("repo checkout: completed worktree cleanup failed",
+			"url", params.RepoURL,
+			"error", err,
+		)
+	} else if len(removed) > 0 {
+		c.logger.Info("repo checkout: cleaned completed worktrees before checkout",
+			"url", params.RepoURL,
+			"count", len(removed),
+			"paths", removed,
 		)
 	}
 
@@ -341,10 +357,6 @@ func (c *Cache) CreateWorktree(params WorktreeParams) (*WorktreeResult, error) {
 
 	// Build branch name: agent/{sanitized-name}/{short-task-id}
 	branchName := fmt.Sprintf("agent/%s/%s", sanitizeName(params.AgentName), shortID(params.TaskID))
-
-	// Derive directory name from repo URL.
-	dirName := repoNameFromURL(params.RepoURL)
-	worktreePath := filepath.Join(params.WorkDir, dirName)
 
 	// If worktree already exists (reused environment from a prior task),
 	// update it to the latest remote code instead of creating a new one.
@@ -440,6 +452,104 @@ func gitWorktreePrune(gitRoot string) error {
 		return fmt.Errorf("git worktree prune: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+type worktreeEntry struct {
+	Path   string
+	Branch string
+	Bare   bool
+}
+
+func listWorktrees(gitRoot string) ([]worktreeEntry, error) {
+	cmd := exec.Command("git", "-C", gitRoot, "worktree", "list", "--porcelain")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("git worktree list --porcelain: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	var entries []worktreeEntry
+	var current *worktreeEntry
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			if current != nil {
+				entries = append(entries, *current)
+				current = nil
+			}
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			if current != nil {
+				entries = append(entries, *current)
+			}
+			current = &worktreeEntry{Path: strings.TrimSpace(strings.TrimPrefix(line, "worktree "))}
+		case line == "bare":
+			if current != nil {
+				current.Bare = true
+			}
+		case strings.HasPrefix(line, "branch "):
+			if current != nil {
+				current.Branch = strings.TrimSpace(strings.TrimPrefix(line, "branch "))
+			}
+		}
+	}
+	if current != nil {
+		entries = append(entries, *current)
+	}
+	return entries, nil
+}
+
+func cleanupCompletedTaskWorktrees(gitRoot, keepPath string, logger *slog.Logger) ([]string, error) {
+	entries, err := listWorktrees(gitRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	var removed []string
+	for _, entry := range entries {
+		if entry.Bare || entry.Path == "" {
+			continue
+		}
+		if samePath(entry.Path, keepPath) {
+			continue
+		}
+		envRoot := filepath.Dir(filepath.Dir(entry.Path))
+		if !hasCompletedGCMeta(envRoot) {
+			continue
+		}
+		if err := gitWorktreeRemove(gitRoot, entry.Path); err != nil {
+			return removed, err
+		}
+		logger.Info("repo checkout: removed completed stale worktree",
+			"path", entry.Path,
+			"branch", entry.Branch,
+		)
+		removed = append(removed, entry.Path)
+	}
+	return removed, nil
+}
+
+func gitWorktreeRemove(gitRoot, worktreePath string) error {
+	cmd := exec.Command("git", "-C", gitRoot, "worktree", "remove", "--force", worktreePath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git worktree remove --force %s: %s: %w", worktreePath, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return a == b
+	}
+	aa := filepath.Clean(a)
+	bb := filepath.Clean(b)
+	return aa == bb
+}
+
+func hasCompletedGCMeta(envRoot string) bool {
+	info, err := os.Stat(filepath.Join(envRoot, ".gc_meta.json"))
+	return err == nil && !info.IsDir()
 }
 
 // isBranchCollisionError returns true if err is specifically about a branch
