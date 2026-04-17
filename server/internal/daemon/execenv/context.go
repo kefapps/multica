@@ -1,6 +1,7 @@
 package execenv
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,7 +10,8 @@ import (
 )
 
 // writeContextFiles renders and writes .agent_context/issue_context.md and
-// skills into the appropriate provider-native location.
+// structured task context plus skills into the appropriate provider-native
+// location.
 //
 // Claude:   skills → {workDir}/.claude/skills/{name}/SKILL.md  (native discovery)
 // Codex:    skills → handled separately in Prepare via codex-home
@@ -27,6 +29,23 @@ func writeContextFiles(workDir, provider string, ctx TaskContextForEnv) error {
 		return fmt.Errorf("write issue_context.md: %w", err)
 	}
 
+	issueData := ctx.IssueData
+	if issueData == nil && ctx.IssueID != "" {
+		issueData = map[string]any{"id": ctx.IssueID}
+	}
+	if err := writeJSONFile(filepath.Join(contextDir, "issue.json"), issueData); err != nil {
+		return fmt.Errorf("write issue.json: %w", err)
+	}
+	if err := writeJSONFile(filepath.Join(contextDir, "comments.json"), nonNilCommentSlice(ctx.CommentsData)); err != nil {
+		return fmt.Errorf("write comments.json: %w", err)
+	}
+	if err := writeJSONFile(filepath.Join(contextDir, "repos.json"), nonNilRepoSlice(ctx.Repos)); err != nil {
+		return fmt.Errorf("write repos.json: %w", err)
+	}
+	if err := writeJSONFile(filepath.Join(contextDir, "task.json"), nonNilTaskData(ctx)); err != nil {
+		return fmt.Errorf("write task.json: %w", err)
+	}
+
 	if len(ctx.AgentSkills) > 0 {
 		skillsDir, err := resolveSkillsDir(workDir, provider)
 		if err != nil {
@@ -41,6 +60,43 @@ func writeContextFiles(workDir, provider string, ctx TaskContextForEnv) error {
 	}
 
 	return nil
+}
+
+func writeJSONFile(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
+}
+
+func nonNilCommentSlice(in []map[string]any) []map[string]any {
+	if in == nil {
+		return []map[string]any{}
+	}
+	return in
+}
+
+func nonNilRepoSlice(in []RepoContextForEnv) []RepoContextForEnv {
+	if in == nil {
+		return []RepoContextForEnv{}
+	}
+	return in
+}
+
+func nonNilTaskData(ctx TaskContextForEnv) map[string]any {
+	if ctx.TaskData != nil {
+		return ctx.TaskData
+	}
+	return map[string]any{
+		"issue_id":                ctx.IssueID,
+		"trigger_comment_id":      ctx.TriggerCommentID,
+		"trigger_comment_content": ctx.TriggerCommentContent,
+		"chat_session_id":         ctx.ChatSessionID,
+		"agent_id":                ctx.AgentID,
+		"agent_name":              ctx.AgentName,
+	}
 }
 
 // resolveSkillsDir returns the directory where skills should be written
@@ -124,8 +180,19 @@ func renderIssueContext(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("**Trigger:** New Assignment\n\n")
 	}
 
-	b.WriteString("## Quick Start\n\n")
-	fmt.Fprintf(&b, "Run `multica issue get %s --output json` to fetch the full issue details.\n\n", ctx.IssueID)
+	if ctx.TriggerCommentContent != "" {
+		b.WriteString("## Triggering Comment\n\n")
+		b.WriteString("> " + strings.ReplaceAll(ctx.TriggerCommentContent, "\n", "\n> ") + "\n\n")
+	}
+
+	b.WriteString("## Local Context\n\n")
+	b.WriteString("Read the injected files in `.agent_context/` before making any Multica CLI read call:\n\n")
+	b.WriteString("- `issue_context.md` — concise assignment summary\n")
+	b.WriteString("- `issue.json` — full issue payload fetched by the daemon\n")
+	b.WriteString("- `comments.json` — current issue comments fetched by the daemon\n")
+	b.WriteString("- `repos.json` — repositories available for checkout\n")
+	b.WriteString("- `task.json` — task/trigger metadata\n\n")
+	b.WriteString("Use the `multica` CLI only when you need to write back to the platform or explicitly refresh data.\n\n")
 
 	if len(ctx.AgentSkills) > 0 {
 		b.WriteString("## Agent Skills\n\n")

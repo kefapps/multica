@@ -39,6 +39,16 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 	b.WriteString("# Multica Agent Runtime\n\n")
 	b.WriteString("You are a coding agent in the Multica platform. Use the `multica` CLI to interact with the platform.\n\n")
 
+	b.WriteString("## Local Context\n\n")
+	b.WriteString("The daemon has already injected the initial task context into `.agent_context/`.\n")
+	b.WriteString("Read these files before making any Multica CLI read call:\n\n")
+	b.WriteString("- `.agent_context/issue_context.md`\n")
+	b.WriteString("- `.agent_context/issue.json`\n")
+	b.WriteString("- `.agent_context/comments.json`\n")
+	b.WriteString("- `.agent_context/repos.json`\n")
+	b.WriteString("- `.agent_context/task.json`\n\n")
+	b.WriteString("Use `multica` CLI reads only when you need to refresh context beyond those injected files.\n\n")
+
 	// Always emit agent identity so the agent knows who it is, even when
 	// dispatched via @mention on an issue assigned to a different agent.
 	if ctx.AgentName != "" || ctx.AgentID != "" {
@@ -115,19 +125,18 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 	} else if ctx.TriggerCommentID != "" {
 		// Comment-triggered: focus on reading and replying
 		b.WriteString("**This task was triggered by a NEW comment.** Your primary job is to respond to THIS specific comment, even if you have handled similar requests before in this session.\n\n")
-		fmt.Fprintf(&b, "1. Run `multica issue get %s --output json` to understand the issue context\n", ctx.IssueID)
-		fmt.Fprintf(&b, "2. Run `multica issue comment list %s --output json` to read the conversation\n", ctx.IssueID)
-		b.WriteString("   - If the output is very large or truncated, use pagination: `--limit 30` to get the latest 30 comments, or `--since <timestamp>` to fetch only recent ones\n")
-		fmt.Fprintf(&b, "3. Find the triggering comment (ID: `%s`) and understand what is being asked — do NOT confuse it with previous comments\n", ctx.TriggerCommentID)
+		b.WriteString("1. Read `.agent_context/issue.json` and `.agent_context/comments.json` to understand the current issue state and conversation\n")
+		fmt.Fprintf(&b, "2. Find the triggering comment (ID: `%s`) and understand what is being asked — do NOT confuse it with previous comments\n", ctx.TriggerCommentID)
+		b.WriteString("3. If the local context is stale or insufficient, refresh it explicitly with `multica issue get ...` and/or `multica issue comment list ...`\n")
 		fmt.Fprintf(&b, "4. Reply: `multica issue comment add %s --parent %s --content \"...\"`\n", ctx.IssueID, ctx.TriggerCommentID)
 		b.WriteString("5. If the comment requests code changes or further work, do the work first, then reply with your results\n")
 		b.WriteString("6. Do NOT change the issue status unless the comment explicitly asks for it\n\n")
 	} else {
 		// Assignment-triggered: defer to agent Skills for workflow specifics.
 		b.WriteString("You are responsible for managing the issue status throughout your work.\n\n")
-		fmt.Fprintf(&b, "1. Run `multica issue get %s --output json` to understand your task\n", ctx.IssueID)
+		b.WriteString("1. Read `.agent_context/issue.json`, `.agent_context/comments.json`, and `.agent_context/task.json` to understand the task\n")
 		fmt.Fprintf(&b, "2. Run `multica issue status %s in_progress`\n", ctx.IssueID)
-		b.WriteString("3. Read comments for additional context or human instructions\n")
+		b.WriteString("3. Refresh issue/comments via `multica` only if the injected context is stale or incomplete\n")
 		b.WriteString("4. Follow your Skills and Agent Identity to determine how to complete this task.\n")
 		b.WriteString("   If no relevant skill applies, the default workflow is: understand the task → do the work → post a comment with results → update issue status.\n")
 		fmt.Fprintf(&b, "5. When done, run `multica issue status %s in_review`\n", ctx.IssueID)

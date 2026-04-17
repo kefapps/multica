@@ -307,6 +307,13 @@ func (c *Cache) CreateWorktree(params WorktreeParams) (*WorktreeResult, error) {
 	repoLock.Lock()
 	defer repoLock.Unlock()
 
+	if err := gitWorktreePrune(barePath); err != nil {
+		c.logger.Warn("repo checkout: worktree prune failed before checkout",
+			"url", params.RepoURL,
+			"error", err,
+		)
+	}
+
 	// Fetch latest from origin. This also migrates the bare cache's refspec
 	// to the modern remote-tracking layout on first run, so subsequent fetches
 	// never collide with the refs/heads/agent/* branches that worktree creation
@@ -404,7 +411,12 @@ func createWorktree(gitRoot, worktreePath, branchName, baseRef string) (string, 
 
 	err := runWorktreeAdd(gitRoot, worktreePath, branchName, baseRef)
 	if err != nil && isBranchCollisionError(err) {
-		// Branch name collision: append timestamp and retry once.
+		if pruneErr := gitWorktreePrune(gitRoot); pruneErr == nil {
+			err = runWorktreeAdd(gitRoot, worktreePath, branchName, baseRef)
+		}
+	}
+	if err != nil && isBranchCollisionError(err) {
+		// Branch name collision that survived pruning: append timestamp and retry once.
 		branchName = fmt.Sprintf("%s-%d", branchName, time.Now().Unix())
 		err = runWorktreeAdd(gitRoot, worktreePath, branchName, baseRef)
 	}
@@ -418,6 +430,14 @@ func runWorktreeAdd(gitRoot, worktreePath, branchName, baseRef string) error {
 	cmd := exec.Command("git", "-C", gitRoot, "worktree", "add", "-b", branchName, worktreePath, baseRef)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git worktree add: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func gitWorktreePrune(gitRoot string) error {
+	cmd := exec.Command("git", "-C", gitRoot, "worktree", "prune")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git worktree prune: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
@@ -575,6 +595,27 @@ func getRemoteDefaultBranch(barePath string) string {
 		return bareRef
 	}
 	return ""
+}
+
+// DefaultBranchRef resolves the bare cache's best default-branch ref.
+// Returns the git ref path usable as a read/show startpoint, or "" when the
+// cache has no unambiguous default branch.
+func DefaultBranchRef(barePath string) string {
+	return getRemoteDefaultBranch(barePath)
+}
+
+// ReadFileAtRef reads a single file from a bare repo at the given ref using
+// `git show <ref>:<path>`.
+func ReadFileAtRef(barePath, ref, relPath string) ([]byte, error) {
+	if ref == "" {
+		return nil, fmt.Errorf("empty ref")
+	}
+	spec := fmt.Sprintf("%s:%s", ref, relPath)
+	out, err := exec.Command("git", "-C", barePath, "show", spec).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("git show %s: %s: %w", spec, strings.TrimSpace(string(out)), err)
+	}
+	return out, nil
 }
 
 // bareHeadBranch returns the bare repo's local HEAD ref (e.g.

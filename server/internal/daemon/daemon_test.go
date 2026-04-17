@@ -38,10 +38,11 @@ func TestBuildPromptContainsIssueID(t *testing.T) {
 		},
 	})
 
-	// Prompt should contain the issue ID and CLI hint.
+	// Prompt should contain the issue ID and local-context hint.
 	for _, want := range []string{
 		issueID,
-		"multica issue get",
+		".agent_context/",
+		"multica` CLI read commands",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q", want)
@@ -97,9 +98,9 @@ func TestBuildPromptCommentTriggered(t *testing.T) {
 		}
 	}
 
-	// Should still contain CLI hint for fetching issue context.
-	if !strings.Contains(prompt, "multica issue get") {
-		t.Fatal("prompt missing CLI hint for issue context")
+	// Should still contain local-context guidance.
+	if !strings.Contains(prompt, ".agent_context/") {
+		t.Fatal("prompt missing local context guidance")
 	}
 }
 
@@ -114,8 +115,8 @@ func TestBuildPromptCommentTriggeredNoContent(t *testing.T) {
 		Agent:            &AgentData{Name: "Test"},
 	})
 
-	if !strings.Contains(prompt, "multica issue get") {
-		t.Fatal("prompt missing CLI hint")
+	if !strings.Contains(prompt, ".agent_context/") {
+		t.Fatal("prompt missing local context guidance")
 	}
 }
 

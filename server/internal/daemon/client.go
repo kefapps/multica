@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -138,6 +139,30 @@ func (c *Client) GetTaskStatus(ctx context.Context, taskID string) (string, erro
 		return "", err
 	}
 	return resp.Status, nil
+}
+
+// GetIssueData fetches the raw issue payload as served by /api/issues/{id}.
+func (c *Client) GetIssueData(ctx context.Context, issueID string) (map[string]any, error) {
+	var issue map[string]any
+	if err := c.getJSON(ctx, "/api/issues/"+issueID, &issue); err != nil {
+		return nil, err
+	}
+	return issue, nil
+}
+
+// ListIssueCommentsData fetches the raw issue comments payload with a bounded page size.
+func (c *Client) ListIssueCommentsData(ctx context.Context, issueID string, limit int) ([]map[string]any, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	params := url.Values{}
+	params.Set("limit", fmt.Sprintf("%d", limit))
+	path := "/api/issues/" + issueID + "/comments?" + params.Encode()
+	var comments []map[string]any
+	if err := c.getJSON(ctx, path, &comments); err != nil {
+		return nil, err
+	}
+	return comments, nil
 }
 
 func (c *Client) ReportUsage(ctx context.Context, runtimeID string, entries []map[string]any) error {

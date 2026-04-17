@@ -145,7 +145,6 @@ func (d *Daemon) resolveAuth() error {
 	return nil
 }
 
-
 // allRuntimeIDs returns all runtime IDs across all watched workspaces.
 func (d *Daemon) allRuntimeIDs() []string {
 	d.mu.Lock()
@@ -800,6 +799,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	if !ok {
 		return TaskResult{}, fmt.Errorf("no agent configured for provider %q", provider)
 	}
+	taskStart := time.Now()
+	logPhase := func(phase string, attrs ...any) {
+		fields := []any{"phase", phase, "elapsed_ms", time.Since(taskStart).Milliseconds()}
+		fields = append(fields, attrs...)
+		taskLog.Info("task phase", fields...)
+	}
 
 	agentName := "agent"
 	var agentID string
@@ -812,18 +817,24 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		instructions = task.Agent.Instructions
 	}
 
+	issueData, commentsData := d.fetchInitialTaskContextData(ctx, task, taskLog, taskStart)
+
 	// Prepare isolated execution environment.
 	// Repos are passed as metadata only — the agent checks them out on demand
 	// via `multica repo checkout <url>`.
 	taskCtx := execenv.TaskContextForEnv{
-		IssueID:           task.IssueID,
-		TriggerCommentID:  task.TriggerCommentID,
-		AgentID:           agentID,
-		AgentName:         agentName,
-		AgentInstructions: instructions,
-		AgentSkills:       convertSkillsForEnv(skills),
-		Repos:             convertReposForEnv(task.Repos),
-		ChatSessionID:     task.ChatSessionID,
+		IssueID:               task.IssueID,
+		TriggerCommentID:      task.TriggerCommentID,
+		TriggerCommentContent: task.TriggerCommentContent,
+		AgentID:               agentID,
+		AgentName:             agentName,
+		AgentInstructions:     instructions,
+		AgentSkills:           convertSkillsForEnv(skills),
+		Repos:                 convertReposForEnv(task.Repos),
+		ChatSessionID:         task.ChatSessionID,
+		TaskData:              buildTaskData(task, provider, agentName),
+		IssueData:             issueData,
+		CommentsData:          commentsData,
 	}
 
 	// Try to reuse the workdir from a previous task on the same (agent, issue) pair.
@@ -832,6 +843,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		env = execenv.Reuse(task.PriorWorkDir, provider, taskCtx, d.logger)
 	}
 	if env == nil {
+		logPhase("env_prepare_start", "reused", false)
 		var err error
 		env, err = execenv.Prepare(execenv.PrepareParams{
 			WorkspacesRoot: d.cfg.WorkspacesRoot,
@@ -844,12 +856,17 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		if err != nil {
 			return TaskResult{}, fmt.Errorf("prepare execution environment: %w", err)
 		}
+		logPhase("env_prepared", "reused", false, "workdir", env.WorkDir)
+	} else {
+		logPhase("env_prepared", "reused", true, "workdir", env.WorkDir)
 	}
 
 	// Inject runtime-specific config (meta skill) so the agent discovers .agent_context/.
+	logPhase("runtime_config_inject_start")
 	if err := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx); err != nil {
 		d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
 	}
+	logPhase("runtime_config_injected")
 	// NOTE: No cleanup — workdir is preserved for reuse by future tasks on
 	// the same (agent, issue) pair. The work_dir path is stored in DB on
 	// task completion and passed back via PriorWorkDir on the next claim.
@@ -902,6 +919,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	if err != nil {
 		return TaskResult{}, fmt.Errorf("create agent backend: %w", err)
 	}
+	logPhase("backend_created")
 
 	reused := task.PriorWorkDir != "" && env.WorkDir == task.PriorWorkDir
 	taskLog.Info("starting agent",
@@ -913,8 +931,6 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	if task.PriorSessionID != "" {
 		taskLog.Info("resuming session", "session_id", task.PriorSessionID)
 	}
-
-	taskStart := time.Now()
 
 	var customArgs []string
 	if task.Agent != nil {
@@ -1000,10 +1016,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 // executeAndDrain runs a backend, drains its message stream (forwarding to the
 // server), and waits for the final result.
 func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, prompt string, opts agent.ExecOptions, taskLog *slog.Logger, taskID string) (agent.Result, int32, error) {
+	execStart := time.Now()
 	session, err := backend.Execute(ctx, prompt, opts)
 	if err != nil {
 		return agent.Result{}, 0, err
 	}
+	taskLog.Info("task phase", "phase", "session_started", "elapsed_ms", time.Since(execStart).Milliseconds())
 
 	// Create an independent drain deadline so we don't block forever if the
 	// backend's internal timeout fails to produce a Result (e.g. scanner
@@ -1024,6 +1042,9 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 		var pendingThinking strings.Builder
 		var batch []TaskMessageData
 		callIDToTool := map[string]string{}
+		var firstTextLogged atomic.Bool
+		var firstThinkingLogged atomic.Bool
+		var firstToolLogged atomic.Bool
 
 		flush := func() {
 			mu.Lock()
@@ -1081,6 +1102,9 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 				}
 				switch msg.Type {
 				case agent.MessageToolUse:
+					if firstToolLogged.CompareAndSwap(false, true) {
+						taskLog.Info("task phase", "phase", "first_tool_use", "elapsed_ms", time.Since(execStart).Milliseconds(), "tool", msg.Tool)
+					}
 					n := toolCount.Add(1)
 					taskLog.Info(fmt.Sprintf("tool #%d: %s", n, msg.Tool))
 					if msg.CallID != "" {
@@ -1119,12 +1143,18 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 					mu.Unlock()
 				case agent.MessageThinking:
 					if msg.Content != "" {
+						if firstThinkingLogged.CompareAndSwap(false, true) {
+							taskLog.Info("task phase", "phase", "first_thinking", "elapsed_ms", time.Since(execStart).Milliseconds())
+						}
 						mu.Lock()
 						pendingThinking.WriteString(msg.Content)
 						mu.Unlock()
 					}
 				case agent.MessageText:
 					if msg.Content != "" {
+						if firstTextLogged.CompareAndSwap(false, true) {
+							taskLog.Info("task phase", "phase", "first_text", "elapsed_ms", time.Since(execStart).Milliseconds())
+						}
 						taskLog.Debug("agent", "text", truncateLog(msg.Content, 200))
 						mu.Lock()
 						pendingText.WriteString(msg.Content)
@@ -1159,6 +1189,56 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 			Error:  "agent did not produce result within drain timeout",
 		}, toolCount.Load(), nil
 	}
+}
+
+func buildTaskData(task Task, provider, agentName string) map[string]any {
+	return map[string]any{
+		"id":                      task.ID,
+		"issue_id":                task.IssueID,
+		"workspace_id":            task.WorkspaceID,
+		"runtime_id":              task.RuntimeID,
+		"provider":                provider,
+		"agent_id":                task.AgentID,
+		"agent_name":              agentName,
+		"trigger_comment_id":      task.TriggerCommentID,
+		"trigger_comment_content": task.TriggerCommentContent,
+		"chat_session_id":         task.ChatSessionID,
+		"chat_message":            task.ChatMessage,
+		"prior_session_id":        task.PriorSessionID,
+		"prior_work_dir":          task.PriorWorkDir,
+	}
+}
+
+func (d *Daemon) fetchInitialTaskContextData(ctx context.Context, task Task, taskLog *slog.Logger, taskStart time.Time) (map[string]any, []map[string]any) {
+	if task.IssueID == "" {
+		return nil, nil
+	}
+
+	readCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	var issueData map[string]any
+	if issue, err := d.client.GetIssueData(readCtx, task.IssueID); err != nil {
+		taskLog.Warn("initial issue fetch failed, continuing with minimal context", "error", err)
+	} else {
+		issueData = issue
+	}
+
+	var commentsData []map[string]any
+	if comments, err := d.client.ListIssueCommentsData(readCtx, task.IssueID, 100); err != nil {
+		taskLog.Warn("initial comments fetch failed, continuing with empty comments context", "error", err)
+	} else {
+		commentsData = comments
+	}
+
+	taskLog.Info("task phase",
+		"phase", "local_context_fetched",
+		"elapsed_ms", time.Since(taskStart).Milliseconds(),
+		"issue_loaded", issueData != nil,
+		"comments_count", len(commentsData),
+	)
+
+	return issueData, commentsData
 }
 
 func mergeUsage(a, b map[string]agent.TokenUsage) map[string]agent.TokenUsage {

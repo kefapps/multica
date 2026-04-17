@@ -1,15 +1,55 @@
 package execenv
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multica-ai/multica/server/internal/daemon/repocache"
 )
 
 func testLogger() *slog.Logger {
 	return slog.Default()
+}
+
+func testCodexHomeParams(codexHome, workspacesRoot, workspaceID string, repos []RepoContextForEnv) CodexHomeParams {
+	return CodexHomeParams{
+		CodexHome:      codexHome,
+		WorkspacesRoot: workspacesRoot,
+		WorkspaceID:    workspaceID,
+		Repos:          repos,
+		Logger:         testLogger(),
+	}
+}
+
+func createOverlayRepo(t *testing.T, overlay string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".multica"), 0o755); err != nil {
+		t.Fatalf("mkdir .multica: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".multica", "codex-task.toml"), []byte(overlay), 0o644); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	for _, args := range [][]string{
+		{"init", dir},
+		{"-C", dir, "add", "."},
+		{"-C", dir, "commit", "-m", "initial overlay"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git setup failed: %s: %v", out, err)
+		}
+	}
+	return dir
 }
 
 func TestShortID(t *testing.T) {
@@ -109,6 +149,14 @@ func TestPrepareDirectoryMode(t *testing.T) {
 		}
 	}
 
+	issueJSON, err := os.ReadFile(filepath.Join(env.WorkDir, ".agent_context", "issue.json"))
+	if err != nil {
+		t.Fatalf("failed to read issue.json: %v", err)
+	}
+	if !strings.Contains(string(issueJSON), "a1b2c3d4-e5f6-7890-abcd-ef1234567890") {
+		t.Fatal("issue.json missing issue ID fallback payload")
+	}
+
 	// Verify skill files.
 	skillContent, err := os.ReadFile(filepath.Join(env.WorkDir, ".agent_context", "skills", "code-review", "SKILL.md"))
 	if err != nil {
@@ -185,6 +233,14 @@ func TestWriteContextFiles(t *testing.T) {
 
 	ctx := TaskContextForEnv{
 		IssueID: "test-issue-id-1234",
+		IssueData: map[string]any{
+			"id":          "test-issue-id-1234",
+			"title":       "Diagnose startup stalls",
+			"description": "Injected by daemon",
+		},
+		CommentsData: []map[string]any{
+			{"id": "comment-1", "content": "Please investigate the slowdown."},
+		},
 		AgentSkills: []SkillContextForEnv{
 			{
 				Name:    "Go Conventions",
@@ -208,6 +264,8 @@ func TestWriteContextFiles(t *testing.T) {
 	s := string(content)
 	for _, want := range []string{
 		"test-issue-id-1234",
+		"issue.json",
+		"comments.json",
 		"## Agent Skills",
 		"Go Conventions",
 	} {
@@ -216,11 +274,24 @@ func TestWriteContextFiles(t *testing.T) {
 		}
 	}
 
-	// Issue details should NOT be in the context file (agent fetches via CLI).
-	for _, absent := range []string{"## Description", "## Workspace Context"} {
-		if strings.Contains(s, absent) {
-			t.Errorf("content should NOT contain %q — agent fetches details via CLI", absent)
-		}
+	var issuePayload map[string]any
+	if data, err := os.ReadFile(filepath.Join(dir, ".agent_context", "issue.json")); err != nil {
+		t.Fatalf("failed to read issue.json: %v", err)
+	} else if err := json.Unmarshal(data, &issuePayload); err != nil {
+		t.Fatalf("failed to decode issue.json: %v", err)
+	}
+	if issuePayload["title"] != "Diagnose startup stalls" {
+		t.Errorf("issue.json title = %v, want %q", issuePayload["title"], "Diagnose startup stalls")
+	}
+
+	var commentsPayload []map[string]any
+	if data, err := os.ReadFile(filepath.Join(dir, ".agent_context", "comments.json")); err != nil {
+		t.Fatalf("failed to read comments.json: %v", err)
+	} else if err := json.Unmarshal(data, &commentsPayload); err != nil {
+		t.Fatalf("failed to decode comments.json: %v", err)
+	}
+	if len(commentsPayload) != 1 || commentsPayload[0]["id"] != "comment-1" {
+		t.Fatalf("comments.json payload = %#v, want one injected comment", commentsPayload)
 	}
 
 	// Verify skill directory and files.
@@ -380,6 +451,7 @@ func TestInjectRuntimeConfigClaude(t *testing.T) {
 		"Multica Agent Runtime",
 		"multica issue get",
 		"multica issue comment list",
+		".agent_context/issue.json",
 		"Go Conventions",
 		"PR Review",
 		"discovered automatically",
@@ -412,6 +484,7 @@ func TestInjectRuntimeConfigGemini(t *testing.T) {
 	for _, want := range []string{
 		"Multica Agent Runtime",
 		"multica issue get",
+		".agent_context/task.json",
 		"Writing",
 	} {
 		if !strings.Contains(s, want) {
@@ -453,6 +526,9 @@ func TestInjectRuntimeConfigCodex(t *testing.T) {
 	if !strings.Contains(s, "Coding") {
 		t.Error("AGENTS.md missing skill name")
 	}
+	if !strings.Contains(s, ".agent_context/issue.json") {
+		t.Error("AGENTS.md missing local context guidance")
+	}
 }
 
 func TestInjectRuntimeConfigNoSkills(t *testing.T) {
@@ -471,8 +547,8 @@ func TestInjectRuntimeConfigNoSkills(t *testing.T) {
 	}
 
 	s := string(content)
-	if !strings.Contains(s, "multica issue get") {
-		t.Error("should reference multica CLI even without skills")
+	if !strings.Contains(s, ".agent_context/issue.json") {
+		t.Error("should reference local injected context even without skills")
 	}
 	if strings.Contains(s, "## Skills") {
 		t.Error("should not have Skills section when there are no skills")
@@ -637,7 +713,7 @@ func TestInjectRuntimeConfigUnknownProvider(t *testing.T) {
 	}
 }
 
-func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
+func TestPrepareCodexHomeUsesMinimalBaseline(t *testing.T) {
 	// Cannot use t.Parallel() with t.Setenv.
 
 	// Create a fake shared codex home.
@@ -651,7 +727,7 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 	t.Setenv("CODEX_HOME", sharedHome)
 
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
-	if err := prepareCodexHome(codexHome, testLogger()); err != nil {
+	if err := prepareCodexHome(testCodexHomeParams(codexHome, "", "", nil)); err != nil {
 		t.Fatalf("prepareCodexHome failed: %v", err)
 	}
 
@@ -688,34 +764,24 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 		t.Errorf("auth.json content = %q", data)
 	}
 
-	// config.json should be a copy (not symlink).
-	configPath := filepath.Join(codexHome, "config.json")
-	fi, err = os.Lstat(configPath)
-	if err != nil {
-		t.Fatalf("config.json not found: %v", err)
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		t.Error("config.json should be a copy, not a symlink")
-	}
-	data, _ = os.ReadFile(configPath)
-	if string(data) != `{"model":"o3"}` {
-		t.Errorf("config.json content = %q", data)
+	// config.json and instructions.md should NOT be copied from the shared home.
+	for _, absent := range []string{"config.json", "instructions.md"} {
+		if _, err := os.Stat(filepath.Join(codexHome, absent)); !os.IsNotExist(err) {
+			t.Fatalf("%s should not exist in task codex-home", absent)
+		}
 	}
 
-	// config.toml should be copied and have network access appended.
+	// config.toml should be the minimal Multica baseline, not the shared config.
 	data, _ = os.ReadFile(filepath.Join(codexHome, "config.toml"))
 	tomlStr := string(data)
-	if !strings.Contains(tomlStr, `model = "o3"`) {
-		t.Errorf("config.toml missing original model setting, got: %q", tomlStr)
+	if strings.Contains(tomlStr, `model = "o3"`) {
+		t.Errorf("config.toml should not inherit shared model setting, got: %q", tomlStr)
 	}
 	if !strings.Contains(tomlStr, "network_access = true") {
 		t.Errorf("config.toml missing network_access, got: %q", tomlStr)
 	}
-
-	// instructions.md should be copied.
-	data, _ = os.ReadFile(filepath.Join(codexHome, "instructions.md"))
-	if string(data) != "Be helpful." {
-		t.Errorf("instructions.md content = %q", data)
+	if !strings.Contains(tomlStr, "codex_hooks = false") {
+		t.Errorf("config.toml missing codex_hooks = false, got: %q", tomlStr)
 	}
 }
 
@@ -727,7 +793,7 @@ func TestPrepareCodexHomeSkipsMissingFiles(t *testing.T) {
 	t.Setenv("CODEX_HOME", sharedHome)
 
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
-	if err := prepareCodexHome(codexHome, testLogger()); err != nil {
+	if err := prepareCodexHome(testCodexHomeParams(codexHome, "", "", nil)); err != nil {
 		t.Fatalf("prepareCodexHome failed: %v", err)
 	}
 
@@ -762,21 +828,14 @@ func TestPrepareCodexHomeSkipsMissingFiles(t *testing.T) {
 	}
 }
 
-func TestEnsureCodexNetworkAccessCreatesDefault(t *testing.T) {
+func TestRenderCodexConfigCreatesDefault(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-
-	if err := ensureCodexNetworkAccess(configPath); err != nil {
-		t.Fatalf("ensureCodexNetworkAccess failed: %v", err)
-	}
-
-	data, err := os.ReadFile(configPath)
+	data, err := renderCodexConfig("")
 	if err != nil {
-		t.Fatalf("failed to read config.toml: %v", err)
+		t.Fatalf("renderCodexConfig failed: %v", err)
 	}
 	s := string(data)
-	if !strings.Contains(s, `sandbox_mode = "workspace-write"`) {
+	if !strings.Contains(s, "sandbox_mode") || !strings.Contains(s, "workspace-write") {
 		t.Error("missing sandbox_mode")
 	}
 	if !strings.Contains(s, "[sandbox_workspace_write]") {
@@ -785,48 +844,25 @@ func TestEnsureCodexNetworkAccessCreatesDefault(t *testing.T) {
 	if !strings.Contains(s, "network_access = true") {
 		t.Error("missing network_access = true")
 	}
+	if !strings.Contains(s, "codex_hooks = false") {
+		t.Error("missing codex_hooks = false")
+	}
 }
 
-func TestEnsureCodexNetworkAccessPreservesExisting(t *testing.T) {
+func TestRenderCodexConfigAppliesOverlay(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-
-	existing := `model = "o3"
+	data, err := renderCodexConfig(`
+model_reasoning_effort = "high"
 
 [sandbox_workspace_write]
-network_access = true
-`
-	os.WriteFile(configPath, []byte(existing), 0o644)
-
-	if err := ensureCodexNetworkAccess(configPath); err != nil {
-		t.Fatalf("ensureCodexNetworkAccess failed: %v", err)
+allow_commands = ["git"]
+`)
+	if err != nil {
+		t.Fatalf("renderCodexConfig failed: %v", err)
 	}
-
-	data, _ := os.ReadFile(configPath)
-	if string(data) != existing {
-		t.Errorf("config should be unchanged, got:\n%s", data)
-	}
-}
-
-func TestEnsureCodexNetworkAccessAppendsToExisting(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-
-	existing := `model = "o3"
-sandbox_mode = "workspace-write"
-`
-	os.WriteFile(configPath, []byte(existing), 0o644)
-
-	if err := ensureCodexNetworkAccess(configPath); err != nil {
-		t.Fatalf("ensureCodexNetworkAccess failed: %v", err)
-	}
-
-	data, _ := os.ReadFile(configPath)
 	s := string(data)
-	if !strings.Contains(s, `model = "o3"`) {
-		t.Error("lost existing model setting")
+	if !strings.Contains(s, "model_reasoning_effort") || !strings.Contains(s, "high") {
+		t.Error("lost overlay reasoning setting")
 	}
 	if !strings.Contains(s, "[sandbox_workspace_write]") {
 		t.Error("missing [sandbox_workspace_write] section")
@@ -834,30 +870,8 @@ sandbox_mode = "workspace-write"
 	if !strings.Contains(s, "network_access = true") {
 		t.Error("missing network_access = true")
 	}
-}
-
-func TestEnsureCodexNetworkAccessAddsMissingKey(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-
-	// Section exists but without network_access.
-	existing := `[sandbox_workspace_write]
-allow_commands = ["git"]
-`
-	os.WriteFile(configPath, []byte(existing), 0o644)
-
-	if err := ensureCodexNetworkAccess(configPath); err != nil {
-		t.Fatalf("ensureCodexNetworkAccess failed: %v", err)
-	}
-
-	data, _ := os.ReadFile(configPath)
-	s := string(data)
-	if !strings.Contains(s, "network_access = true") {
-		t.Error("missing network_access = true")
-	}
-	if !strings.Contains(s, `allow_commands = ["git"]`) {
-		t.Error("lost existing allow_commands")
+	if !strings.Contains(s, "allow_commands") || !strings.Contains(s, "git") {
+		t.Error("lost overlay allow_commands")
 	}
 }
 
@@ -869,7 +883,7 @@ func TestPrepareCodexHomeEnsuresNetworkAccess(t *testing.T) {
 	t.Setenv("CODEX_HOME", sharedHome)
 
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
-	if err := prepareCodexHome(codexHome, testLogger()); err != nil {
+	if err := prepareCodexHome(testCodexHomeParams(codexHome, "", "", nil)); err != nil {
 		t.Fatalf("prepareCodexHome failed: %v", err)
 	}
 
@@ -882,8 +896,42 @@ func TestPrepareCodexHomeEnsuresNetworkAccess(t *testing.T) {
 	if !strings.Contains(s, "network_access = true") {
 		t.Error("config.toml missing network_access = true")
 	}
-	if !strings.Contains(s, `sandbox_mode = "workspace-write"`) {
+	if !strings.Contains(s, "sandbox_mode") || !strings.Contains(s, "workspace-write") {
 		t.Error("config.toml missing sandbox_mode")
+	}
+}
+
+func TestPrepareCodexHomeAppliesRepoOverlay(t *testing.T) {
+	sharedHome := t.TempDir()
+	t.Setenv("CODEX_HOME", sharedHome)
+
+	sourceRepo := createOverlayRepo(t, `
+model_reasoning_effort = "high"
+
+[sandbox_workspace_write]
+allow_commands = ["git"]
+`)
+	workspacesRoot := t.TempDir()
+	cache := repocache.New(filepath.Join(workspacesRoot, ".repos"), testLogger())
+	if err := cache.Sync("ws-overlay", []repocache.RepoInfo{{URL: sourceRepo, Description: "overlay repo"}}); err != nil {
+		t.Fatalf("cache sync failed: %v", err)
+	}
+
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	if err := prepareCodexHome(testCodexHomeParams(codexHome, workspacesRoot, "ws-overlay", []RepoContextForEnv{{URL: sourceRepo, Description: "overlay repo"}})); err != nil {
+		t.Fatalf("prepareCodexHome failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "model_reasoning_effort") || !strings.Contains(s, "high") {
+		t.Fatalf("config.toml missing repo overlay reasoning setting: %s", s)
+	}
+	if !strings.Contains(s, "allow_commands") || !strings.Contains(s, "git") {
+		t.Fatalf("config.toml missing repo overlay allow_commands: %s", s)
 	}
 }
 

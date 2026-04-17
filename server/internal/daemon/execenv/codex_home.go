@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/multica-ai/multica/server/internal/daemon/repocache"
+	toml "github.com/pelletier/go-toml/v2"
 )
 
 // Directories to symlink from the shared ~/.codex/ into the per-task CODEX_HOME.
@@ -22,28 +25,53 @@ var codexSymlinkedFiles = []string{
 	"auth.json",
 }
 
-// Files to copy from the shared ~/.codex/ into the per-task CODEX_HOME.
-// Copies are isolated — changes don't affect the shared home.
-var codexCopiedFiles = []string{
+// Files that used to be copied from ~/.codex/ into the task CODEX_HOME but are
+// now deliberately scrubbed to keep task runtimes deterministic and lightweight.
+var codexRemovedFiles = []string{
 	"config.json",
-	"config.toml",
 	"instructions.md",
 }
 
-// prepareCodexHome creates a per-task CODEX_HOME directory and seeds it with
-// config from the shared ~/.codex/ home. Auth is symlinked (shared), config
-// files are copied (isolated).
-func prepareCodexHome(codexHome string, logger *slog.Logger) error {
+const codexRepoOverlayPath = ".multica/codex-task.toml"
+
+type CodexHomeParams struct {
+	CodexHome      string
+	WorkspacesRoot string
+	WorkspaceID    string
+	Repos          []RepoContextForEnv
+	Logger         *slog.Logger
+}
+
+// defaultCodexConfig is the minimal config.toml for Codex tasks.
+// It sets workspace-write sandbox mode with network access enabled and
+// explicitly disables hooks so repo tasks do not inherit arbitrary global
+// automations from the user's main Codex home.
+const defaultCodexConfig = `sandbox_mode = "workspace-write"
+codex_hooks = false
+
+[sandbox_workspace_write]
+network_access = true
+`
+
+// prepareCodexHome creates a per-task CODEX_HOME directory with a deterministic
+// baseline configuration. Only auth/session state is shared from ~/.codex; task
+// config is generated fresh and optionally overlaid from repo-local settings.
+func prepareCodexHome(params CodexHomeParams) error {
+	logger := params.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	sharedHome := resolveSharedCodexHome()
 
-	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+	if err := os.MkdirAll(params.CodexHome, 0o755); err != nil {
 		return fmt.Errorf("create codex-home dir: %w", err)
 	}
 
 	// Symlink shared directories (sessions) so logs stay in the global home.
 	for _, name := range codexSymlinkedDirs {
 		src := filepath.Join(sharedHome, name)
-		dst := filepath.Join(codexHome, name)
+		dst := filepath.Join(params.CodexHome, name)
 		if err := ensureDirSymlink(src, dst); err != nil {
 			logger.Warn("execenv: codex-home dir symlink failed", "dir", name, "error", err)
 		}
@@ -52,28 +80,132 @@ func prepareCodexHome(codexHome string, logger *slog.Logger) error {
 	// Symlink shared files (auth).
 	for _, name := range codexSymlinkedFiles {
 		src := filepath.Join(sharedHome, name)
-		dst := filepath.Join(codexHome, name)
+		dst := filepath.Join(params.CodexHome, name)
 		if err := ensureSymlink(src, dst); err != nil {
 			logger.Warn("execenv: codex-home symlink failed", "file", name, "error", err)
 		}
 	}
 
-	// Copy config files (isolated per task).
-	for _, name := range codexCopiedFiles {
-		src := filepath.Join(sharedHome, name)
-		dst := filepath.Join(codexHome, name)
-		if err := copyFileIfExists(src, dst); err != nil {
-			logger.Warn("execenv: codex-home copy failed", "file", name, "error", err)
-		}
+	// Remove config files inherited by older task envs so reuse stays aligned
+	// with the new isolated policy.
+	for _, name := range append(codexRemovedFiles, "config.toml") {
+		_ = os.Remove(filepath.Join(params.CodexHome, name))
 	}
 
-	// Ensure config.toml has workspace-write sandbox with network access enabled.
-	// Codex needs network access to reach the Multica API (api.multica.ai).
-	if err := ensureCodexNetworkAccess(filepath.Join(codexHome, "config.toml")); err != nil {
-		logger.Warn("execenv: codex-home ensure network access failed", "error", err)
+	overlay, overlaySource, overlayErr := loadCodexRepoOverlay(params.WorkspacesRoot, params.WorkspaceID, params.Repos, logger)
+	if overlayErr != nil {
+		logger.Warn("execenv: codex-home repo overlay unavailable, using baseline config only", "error", overlayErr)
+		overlay = ""
+		overlaySource = ""
 	}
+
+	configBytes, err := renderCodexConfig(overlay)
+	if err != nil {
+		return fmt.Errorf("render codex config: %w", err)
+	}
+	configPath := filepath.Join(params.CodexHome, "config.toml")
+	if err := os.WriteFile(configPath, configBytes, 0o644); err != nil {
+		return fmt.Errorf("write config.toml: %w", err)
+	}
+
+	configSource := "baseline"
+	if overlaySource != "" {
+		configSource = "baseline+repo-overlay"
+	}
+	logger.Info("execenv: prepared codex-home config",
+		"codex_home", params.CodexHome,
+		"config_source", configSource,
+		"overlay_source", overlaySource,
+	)
 
 	return nil
+}
+
+func renderCodexConfig(overlay string) ([]byte, error) {
+	base := map[string]any{
+		"sandbox_mode": "workspace-write",
+		"codex_hooks":  false,
+		"sandbox_workspace_write": map[string]any{
+			"network_access": true,
+		},
+	}
+
+	if strings.TrimSpace(overlay) != "" {
+		var overlayMap map[string]any
+		if err := toml.Unmarshal([]byte(overlay), &overlayMap); err != nil {
+			return nil, fmt.Errorf("parse repo overlay: %w", err)
+		}
+		mergeTOMLMap(base, overlayMap)
+	}
+
+	return toml.Marshal(base)
+}
+
+func mergeTOMLMap(dst, src map[string]any) {
+	for key, srcVal := range src {
+		srcMap, srcIsMap := srcVal.(map[string]any)
+		if !srcIsMap {
+			dst[key] = srcVal
+			continue
+		}
+
+		dstMap, dstIsMap := dst[key].(map[string]any)
+		if !dstIsMap {
+			dst[key] = srcMap
+			continue
+		}
+		mergeTOMLMap(dstMap, srcMap)
+	}
+}
+
+func loadCodexRepoOverlay(workspacesRoot, workspaceID string, repos []RepoContextForEnv, logger *slog.Logger) (string, string, error) {
+	if workspacesRoot == "" || workspaceID == "" || len(repos) == 0 {
+		return "", "", nil
+	}
+	cache := repocache.New(filepath.Join(workspacesRoot, ".repos"), logger)
+
+	type candidate struct {
+		source string
+		body   string
+	}
+
+	var matches []candidate
+	for _, repo := range repos {
+		barePath := cache.Lookup(workspaceID, repo.URL)
+		if barePath == "" {
+			continue
+		}
+		ref := repocache.DefaultBranchRef(barePath)
+		if ref == "" {
+			logger.Warn("execenv: repo overlay skipped, default branch unresolved", "repo", repo.URL)
+			continue
+		}
+		data, err := repocache.ReadFileAtRef(barePath, ref, codexRepoOverlayPath)
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "path '") && strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+				continue
+			}
+			logger.Warn("execenv: repo overlay read failed", "repo", repo.URL, "ref", ref, "error", err)
+			continue
+		}
+		matches = append(matches, candidate{
+			source: fmt.Sprintf("%s@%s:%s", repo.URL, ref, codexRepoOverlayPath),
+			body:   string(data),
+		})
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", "", nil
+	case 1:
+		return matches[0].body, matches[0].source, nil
+	default:
+		sources := make([]string, 0, len(matches))
+		for _, match := range matches {
+			sources = append(sources, match.source)
+		}
+		return "", "", fmt.Errorf("multiple repo overlays found (%s)", strings.Join(sources, ", "))
+	}
 }
 
 // resolveSharedCodexHome returns the path to the user's shared Codex home.
@@ -107,7 +239,7 @@ func ensureDirSymlink(src, dst string) error {
 			if err == nil && target == src {
 				return nil // already correct
 			}
-			os.Remove(dst)
+			_ = os.Remove(dst)
 		} else {
 			// Regular file/dir exists — don't overwrite.
 			return nil
@@ -128,13 +260,11 @@ func ensureSymlink(src, dst string) error {
 	// Check if dst already exists.
 	if fi, err := os.Lstat(dst); err == nil {
 		if fi.Mode()&os.ModeSymlink != 0 {
-			// It's a symlink — check if it points to the right place.
 			target, err := os.Readlink(dst)
 			if err == nil && target == src {
 				return nil // already correct
 			}
-			// Wrong target — remove and recreate.
-			os.Remove(dst)
+			_ = os.Remove(dst)
 		} else {
 			// Regular file exists — don't overwrite.
 			return nil
@@ -142,69 +272,6 @@ func ensureSymlink(src, dst string) error {
 	}
 
 	return createFileLink(src, dst)
-}
-
-// defaultCodexConfig is the minimal config.toml for Codex tasks.
-// It sets workspace-write sandbox mode with network access enabled so the
-// Multica CLI can reach api.multica.ai.
-const defaultCodexConfig = `sandbox_mode = "workspace-write"
-
-[sandbox_workspace_write]
-network_access = true
-`
-
-// ensureCodexNetworkAccess ensures that config.toml exists and contains the
-// sandbox_workspace_write section with network_access = true. If the file
-// doesn't exist, it creates one with defaults. If it exists but lacks the
-// network_access setting, the section is appended.
-func ensureCodexNetworkAccess(configPath string) error {
-	data, err := os.ReadFile(configPath)
-	if os.IsNotExist(err) {
-		// No config.toml — create with defaults.
-		return os.WriteFile(configPath, []byte(defaultCodexConfig), 0o644)
-	}
-	if err != nil {
-		return fmt.Errorf("read config.toml: %w", err)
-	}
-
-	content := string(data)
-
-	// If the file already has network_access configured under sandbox_workspace_write, leave it alone.
-	if strings.Contains(content, "[sandbox_workspace_write]") && strings.Contains(content, "network_access") {
-		return nil
-	}
-
-	// Append the section. If sandbox_mode is already set, only append the section block.
-	var appendStr string
-	if strings.Contains(content, "[sandbox_workspace_write]") {
-		// Section exists but missing network_access — append the key under it.
-		content = strings.Replace(content, "[sandbox_workspace_write]", "[sandbox_workspace_write]\nnetwork_access = true", 1)
-		return os.WriteFile(configPath, []byte(content), 0o644)
-	}
-
-	// Section doesn't exist — append both sandbox_mode (if missing) and the section.
-	appendStr = "\n"
-	if !strings.Contains(content, "sandbox_mode") {
-		appendStr += "sandbox_mode = \"workspace-write\"\n"
-	}
-	appendStr += "\n[sandbox_workspace_write]\nnetwork_access = true\n"
-
-	return os.WriteFile(configPath, append(data, []byte(appendStr)...), 0o644)
-}
-
-// copyFileIfExists copies src to dst. If src doesn't exist, it's a no-op.
-// If dst already exists, it's not overwritten.
-func copyFileIfExists(src, dst string) error {
-	if _, err := os.Stat(src); os.IsNotExist(err) {
-		return nil
-	}
-
-	// Don't overwrite existing file.
-	if _, err := os.Stat(dst); err == nil {
-		return nil
-	}
-
-	return copyFile(src, dst)
 }
 
 // copyFile copies src to dst unconditionally.
