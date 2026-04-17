@@ -15,22 +15,19 @@ import (
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
+	"github.com/multica-ai/multica/server/internal/daemon/usage"
 	"github.com/multica-ai/multica/server/pkg/agent"
 )
 
-// ErrRepoNotConfigured is returned by ensureRepoReady when the requested repo
-// URL is not present in the workspace's repo configuration after a fresh
-// server refresh.
+// ErrRepoNotConfigured indicates that the requested repo URL is not present
+// in the workspace repo list after a fresh workspace sync.
 var ErrRepoNotConfigured = errors.New("repo is not configured for this workspace")
 
 // workspaceState tracks registered runtimes for a single workspace.
 type workspaceState struct {
-	workspaceID     string
-	runtimeIDs      []string
-	reposVersion    string             // stored for future use: skip refresh when version unchanged
-	allowedRepoURLs map[string]struct{}
-	lastRepoSyncErr string
-	repoRefreshMu   sync.Mutex
+	workspaceID string
+	runtimeIDs  []string
+	repos       []RepoData
 }
 
 // Daemon is the local agent runtime that polls for and executes tasks.
@@ -43,10 +40,7 @@ type Daemon struct {
 	mu           sync.Mutex
 	workspaces   map[string]*workspaceState
 	runtimeIndex map[string]Runtime // runtimeID -> Runtime for provider lookups
-	reloading    sync.Mutex         // prevents concurrent workspace syncs
-
-	versionsMu    sync.RWMutex      // guards agentVersions
-	agentVersions map[string]string // provider -> detected CLI version (set during registration)
+	reloading    sync.Mutex         // prevents concurrent reloadWorkspaces
 
 	cancelFunc    context.CancelFunc // set by Run(); called by triggerRestart
 	restartBinary string             // non-empty after a successful update; path to the new binary
@@ -58,30 +52,13 @@ type Daemon struct {
 func New(cfg Config, logger *slog.Logger) *Daemon {
 	cacheRoot := filepath.Join(cfg.WorkspacesRoot, ".repos")
 	return &Daemon{
-		cfg:           cfg,
-		client:        NewClient(cfg.ServerBaseURL),
-		repoCache:     repocache.New(cacheRoot, logger),
-		logger:        logger,
-		workspaces:    make(map[string]*workspaceState),
-		runtimeIndex:  make(map[string]Runtime),
-		agentVersions: make(map[string]string),
+		cfg:          cfg,
+		client:       NewClient(cfg.ServerBaseURL),
+		repoCache:    repocache.New(cacheRoot, logger),
+		logger:       logger,
+		workspaces:   make(map[string]*workspaceState),
+		runtimeIndex: make(map[string]Runtime),
 	}
-}
-
-// setAgentVersion records the detected CLI version for an agent provider so
-// later task-dispatch code (e.g. Codex sandbox policy) can read it.
-func (d *Daemon) setAgentVersion(provider, version string) {
-	d.versionsMu.Lock()
-	defer d.versionsMu.Unlock()
-	d.agentVersions[provider] = version
-}
-
-// agentVersion returns the last-detected CLI version for an agent provider,
-// or an empty string if unknown.
-func (d *Daemon) agentVersion(provider string) string {
-	d.versionsMu.RLock()
-	defer d.versionsMu.RUnlock()
-	return d.agentVersions[provider]
 }
 
 // Run starts the daemon: resolves auth, registers runtimes, then polls for tasks.
@@ -111,14 +88,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 
-	// Fetch all user workspaces from the API and register runtimes for any
-	// that exist. Zero workspaces is a valid state — a newly-signed-up user
-	// may start the daemon before creating their first workspace. The
-	// workspaceSyncLoop below polls every 30s and will register runtimes
-	// when a workspace appears, so the daemon stays useful as a long-lived
-	// background process rather than crashing at startup.
+	// Fetch all user workspaces from the API and register runtimes.
 	if err := d.syncWorkspacesFromAPI(ctx); err != nil {
 		return err
+	}
+	if len(d.allRuntimeIDs()) == 0 {
+		return fmt.Errorf("no runtimes registered")
 	}
 
 	// Deregister runtimes on shutdown (uses a fresh context since ctx will be cancelled).
@@ -128,6 +103,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.workspaceSyncLoop(ctx)
 
 	go d.heartbeatLoop(ctx)
+	go d.usageScanLoop(ctx)
 	go d.gcLoop(ctx)
 	go d.serveHealth(ctx, healthLn, time.Now())
 	return d.pollLoop(ctx)
@@ -196,6 +172,17 @@ func (d *Daemon) findRuntime(id string) *Runtime {
 	return nil
 }
 
+// providerToRuntimeMap returns a mapping from provider name to runtime ID.
+func (d *Daemon) providerToRuntimeMap() map[string]string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	m := make(map[string]string)
+	for id, rt := range d.runtimeIndex {
+		m[rt.Provider] = id
+	}
+	return m
+}
+
 func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID string) (*RegisterResponse, error) {
 	var runtimes []map[string]string
 	for name, entry := range d.cfg.Agents {
@@ -208,7 +195,6 @@ func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID s
 			d.logger.Warn("skip registering runtime: version too old", "name", name, "version", version, "error", err)
 			continue
 		}
-		d.setAgentVersion(name, version)
 		displayName := strings.ToUpper(name[:1]) + name[1:]
 		if d.cfg.DeviceName != "" {
 			displayName = fmt.Sprintf("%s (%s)", displayName, d.cfg.DeviceName)
@@ -225,13 +211,12 @@ func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID s
 	}
 
 	req := map[string]any{
-		"workspace_id":      workspaceID,
-		"daemon_id":         d.cfg.DaemonID,
-		"legacy_daemon_ids": d.cfg.LegacyDaemonIDs,
-		"device_name":       d.cfg.DeviceName,
-		"cli_version":       d.cfg.CLIVersion,
-		"launched_by":       d.cfg.LaunchedBy,
-		"runtimes":          runtimes,
+		"workspace_id": workspaceID,
+		"daemon_id":    d.cfg.DaemonID,
+		"device_name":  d.cfg.DeviceName,
+		"cli_version":  d.cfg.CLIVersion,
+		"launched_by":  d.cfg.LaunchedBy,
+		"runtimes":     runtimes,
 	}
 
 	resp, err := d.client.Register(ctx, req)
@@ -242,133 +227,6 @@ func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID s
 		return nil, fmt.Errorf("register runtimes: empty response")
 	}
 	return resp, nil
-}
-
-func newWorkspaceState(workspaceID string, runtimeIDs []string, reposVersion string, repos []RepoData) *workspaceState {
-	return &workspaceState{
-		workspaceID:     workspaceID,
-		runtimeIDs:      runtimeIDs,
-		reposVersion:    reposVersion,
-		allowedRepoURLs: repoAllowlist(repos),
-	}
-}
-
-func repoAllowlist(repos []RepoData) map[string]struct{} {
-	allowed := make(map[string]struct{}, len(repos))
-	for _, repo := range repos {
-		if repo.URL == "" {
-			continue
-		}
-		allowed[repo.URL] = struct{}{}
-	}
-	return allowed
-}
-
-func (d *Daemon) setWorkspaceRepoSyncError(workspaceID, syncErr string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if ws, ok := d.workspaces[workspaceID]; ok {
-		ws.lastRepoSyncErr = syncErr
-	}
-}
-
-func (d *Daemon) workspaceRepoAllowed(workspaceID, repoURL string) bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	ws, ok := d.workspaces[workspaceID]
-	if !ok {
-		return false
-	}
-	_, allowed := ws.allowedRepoURLs[repoURL]
-	return allowed
-}
-
-func (d *Daemon) workspaceLastRepoSyncErr(workspaceID string) string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	ws, ok := d.workspaces[workspaceID]
-	if !ok {
-		return ""
-	}
-	return ws.lastRepoSyncErr
-}
-
-func (d *Daemon) syncWorkspaceRepos(workspaceID string, repos []RepoData) {
-	if d.repoCache == nil {
-		return
-	}
-	if err := d.repoCache.Sync(workspaceID, repoDataToInfo(repos)); err != nil {
-		d.setWorkspaceRepoSyncError(workspaceID, err.Error())
-		d.logger.Warn("repo cache sync failed", "workspace_id", workspaceID, "error", err)
-		return
-	}
-	d.setWorkspaceRepoSyncError(workspaceID, "")
-}
-
-func (d *Daemon) refreshWorkspaceRepos(ctx context.Context, workspaceID string) (*WorkspaceReposResponse, error) {
-	refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	resp, err := d.client.GetWorkspaceRepos(refreshCtx, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-
-	d.mu.Lock()
-	if ws, ok := d.workspaces[workspaceID]; ok {
-		ws.reposVersion = resp.ReposVersion
-		ws.allowedRepoURLs = repoAllowlist(resp.Repos)
-	}
-	d.mu.Unlock()
-
-	return resp, nil
-}
-
-func (d *Daemon) ensureRepoReady(ctx context.Context, workspaceID, repoURL string) error {
-	if d.repoCache == nil {
-		return fmt.Errorf("repo cache not initialized")
-	}
-
-	repoURL = strings.TrimSpace(repoURL)
-
-	d.mu.Lock()
-	ws, ok := d.workspaces[workspaceID]
-	d.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("workspace is not watched by this daemon: %s", workspaceID)
-	}
-
-	if d.workspaceRepoAllowed(workspaceID, repoURL) && d.repoCache.Lookup(workspaceID, repoURL) != "" {
-		return nil
-	}
-
-	ws.repoRefreshMu.Lock()
-	defer ws.repoRefreshMu.Unlock()
-
-	if d.workspaceRepoAllowed(workspaceID, repoURL) && d.repoCache.Lookup(workspaceID, repoURL) != "" {
-		return nil
-	}
-
-	resp, err := d.refreshWorkspaceRepos(ctx, workspaceID)
-	if err != nil {
-		return fmt.Errorf("refresh workspace repos: %w", err)
-	}
-
-	if !d.workspaceRepoAllowed(workspaceID, repoURL) {
-		return ErrRepoNotConfigured
-	}
-
-	d.syncWorkspaceRepos(workspaceID, resp.Repos)
-
-	if d.repoCache.Lookup(workspaceID, repoURL) != "" {
-		return nil
-	}
-
-	if syncErr := d.workspaceLastRepoSyncErr(workspaceID); syncErr != "" {
-		return fmt.Errorf("repo is configured but not synced: %s", syncErr)
-	}
-
-	return fmt.Errorf("repo is configured but not synced")
 }
 
 // workspaceSyncLoop periodically fetches the user's workspaces from the API
@@ -404,26 +262,46 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context) error {
 		return fmt.Errorf("list workspaces: %w", err)
 	}
 
-	apiIDs := make(map[string]string, len(workspaces)) // id -> name
+	apiWorkspaces := make(map[string]WorkspaceInfo, len(workspaces))
 	for _, ws := range workspaces {
-		apiIDs[ws.ID] = ws.Name
+		apiWorkspaces[ws.ID] = ws
 	}
 
 	d.mu.Lock()
-	currentIDs := make(map[string]bool, len(d.workspaces))
-	for id := range d.workspaces {
-		currentIDs[id] = true
+	currentStates := make(map[string]workspaceState, len(d.workspaces))
+	for id, ws := range d.workspaces {
+		currentStates[id] = workspaceState{
+			workspaceID: ws.workspaceID,
+			runtimeIDs:  append([]string(nil), ws.runtimeIDs...),
+			repos:       cloneRepoData(ws.repos),
+		}
 	}
 	d.mu.Unlock()
 
 	var registered int
-	for id, name := range apiIDs {
-		if currentIDs[id] {
-			continue // important: never replace existing workspaceState; ensureRepoReady holds ws.repoRefreshMu from the original pointer
+	for id, ws := range apiWorkspaces {
+		if current, ok := currentStates[id]; ok {
+			if !repoDataEquivalent(current.repos, ws.Repos) {
+				repos := cloneRepoData(ws.Repos)
+				d.mu.Lock()
+				if tracked := d.workspaces[id]; tracked != nil {
+					tracked.repos = cloneRepoData(repos)
+				}
+				d.mu.Unlock()
+				if d.repoCache != nil {
+					go func(wsID string, repos []RepoData) {
+						if err := d.repoCache.Sync(wsID, repoDataToInfo(repos)); err != nil {
+							d.logger.Warn("repo cache sync failed after workspace repo update", "workspace_id", wsID, "error", err)
+						}
+					}(id, repos)
+				}
+				d.logger.Info("workspace repos updated", "workspace_id", id, "name", ws.Name, "repo_count", len(repos))
+			}
+			continue
 		}
 		resp, err := d.registerRuntimesForWorkspace(ctx, id)
 		if err != nil {
-			d.logger.Error("failed to register runtimes", "workspace_id", id, "name", name, "error", err)
+			d.logger.Error("failed to register runtimes", "workspace_id", id, "name", ws.Name, "error", err)
 			continue
 		}
 		runtimeIDs := make([]string, len(resp.Runtimes))
@@ -431,24 +309,29 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context) error {
 			runtimeIDs[i] = rt.ID
 			d.logger.Info("registered runtime", "workspace_id", id, "runtime_id", rt.ID, "provider", rt.Provider)
 		}
+		repos := cloneRepoData(resp.Repos)
 		d.mu.Lock()
-		d.workspaces[id] = newWorkspaceState(id, runtimeIDs, resp.ReposVersion, resp.Repos)
+		d.workspaces[id] = &workspaceState{workspaceID: id, runtimeIDs: runtimeIDs, repos: repos}
 		for _, rt := range resp.Runtimes {
 			d.runtimeIndex[rt.ID] = rt
 		}
 		d.mu.Unlock()
 
 		if d.repoCache != nil && len(resp.Repos) > 0 {
-			go d.syncWorkspaceRepos(id, resp.Repos)
+			go func(wsID string, repos []RepoData) {
+				if err := d.repoCache.Sync(wsID, repoDataToInfo(repos)); err != nil {
+					d.logger.Warn("repo cache sync failed", "workspace_id", wsID, "error", err)
+				}
+			}(id, resp.Repos)
 		}
 
-		d.logger.Info("watching workspace", "workspace_id", id, "name", name, "runtimes", len(resp.Runtimes), "repos", len(resp.Repos))
+		d.logger.Info("watching workspace", "workspace_id", id, "name", ws.Name, "runtimes", len(resp.Runtimes))
 		registered++
 	}
 
 	// Remove workspaces the user no longer belongs to.
-	for id := range currentIDs {
-		if _, ok := apiIDs[id]; !ok {
+	for id := range currentStates {
+		if _, ok := apiWorkspaces[id]; !ok {
 			d.mu.Lock()
 			if ws, exists := d.workspaces[id]; exists {
 				for _, rid := range ws.runtimeIDs {
@@ -465,6 +348,66 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context) error {
 		return fmt.Errorf("failed to register runtimes for any of the %d workspace(s)", len(workspaces))
 	}
 	return nil
+}
+
+func (d *Daemon) ensureRepoReady(ctx context.Context, workspaceID, repoURL string) error {
+	if d.repoCache == nil {
+		return fmt.Errorf("repo cache not initialized")
+	}
+
+	repoURL = strings.TrimSpace(repoURL)
+	if repoURL == "" {
+		return fmt.Errorf("repo url is required")
+	}
+
+	repos, ok := d.workspaceRepos(workspaceID)
+	if !ok {
+		return fmt.Errorf("workspace is not watched by this daemon: %s", workspaceID)
+	}
+	if !repoConfigured(repos, repoURL) {
+		refreshCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		if err := d.syncWorkspacesFromAPI(refreshCtx); err != nil {
+			return fmt.Errorf("refresh workspace repos: %w", err)
+		}
+		repos, ok = d.workspaceRepos(workspaceID)
+		if !ok {
+			return fmt.Errorf("workspace is not watched by this daemon: %s", workspaceID)
+		}
+		if !repoConfigured(repos, repoURL) {
+			return ErrRepoNotConfigured
+		}
+	}
+
+	if d.repoCache.Lookup(workspaceID, repoURL) != "" {
+		return nil
+	}
+	if err := d.repoCache.Sync(workspaceID, repoDataToInfo(repos)); err != nil {
+		return fmt.Errorf("repo is configured but not synced: %w", err)
+	}
+	if d.repoCache.Lookup(workspaceID, repoURL) == "" {
+		return fmt.Errorf("repo is configured but not synced")
+	}
+	return nil
+}
+
+func (d *Daemon) workspaceRepos(workspaceID string) ([]RepoData, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ws, ok := d.workspaces[workspaceID]
+	if !ok {
+		return nil, false
+	}
+	return cloneRepoData(ws.repos), true
+}
+
+func repoConfigured(repos []RepoData, repoURL string) bool {
+	for _, repo := range repos {
+		if strings.TrimSpace(repo.URL) == repoURL {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Daemon) heartbeatLoop(ctx context.Context) {
@@ -680,6 +623,62 @@ func (d *Daemon) triggerRestart() {
 	}
 }
 
+func (d *Daemon) usageScanLoop(ctx context.Context) {
+	scanner := usage.NewScanner(d.logger)
+
+	report := func() {
+		records := scanner.Scan()
+		if len(records) == 0 {
+			return
+		}
+
+		// Build provider -> runtime ID mapping from current state.
+		providerToRuntime := d.providerToRuntimeMap()
+
+		// Group records by provider to send to the correct runtime.
+		byProvider := make(map[string][]map[string]any)
+		for _, r := range records {
+			byProvider[r.Provider] = append(byProvider[r.Provider], map[string]any{
+				"date":               r.Date,
+				"provider":           r.Provider,
+				"model":              r.Model,
+				"input_tokens":       r.InputTokens,
+				"output_tokens":      r.OutputTokens,
+				"cache_read_tokens":  r.CacheReadTokens,
+				"cache_write_tokens": r.CacheWriteTokens,
+			})
+		}
+
+		for provider, entries := range byProvider {
+			runtimeID, ok := providerToRuntime[provider]
+			if !ok {
+				d.logger.Debug("no runtime for provider, skipping usage report", "provider", provider)
+				continue
+			}
+			if err := d.client.ReportUsage(ctx, runtimeID, entries); err != nil {
+				d.logger.Warn("usage report failed", "provider", provider, "runtime_id", runtimeID, "error", err)
+			} else {
+				d.logger.Info("usage reported", "provider", provider, "runtime_id", runtimeID, "entries", len(entries))
+			}
+		}
+	}
+
+	// Initial scan on startup.
+	report()
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			report()
+		}
+	}
+}
+
 func (d *Daemon) pollLoop(ctx context.Context) error {
 	sem := make(chan struct{}, d.cfg.MaxConcurrentTasks)
 	var wg sync.WaitGroup
@@ -887,6 +886,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	if !ok {
 		return TaskResult{}, fmt.Errorf("no agent configured for provider %q", provider)
 	}
+	taskStart := time.Now()
+	logPhase := func(phase string, attrs ...any) {
+		fields := []any{"phase", phase, "elapsed_ms", time.Since(taskStart).Milliseconds()}
+		fields = append(fields, attrs...)
+		taskLog.Info("task phase", fields...)
+	}
 
 	agentName := "agent"
 	var agentID string
@@ -899,27 +904,33 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		instructions = task.Agent.Instructions
 	}
 
+	issueData, commentsData := d.fetchInitialTaskContextData(ctx, task, taskLog, taskStart)
+
 	// Prepare isolated execution environment.
 	// Repos are passed as metadata only — the agent checks them out on demand
 	// via `multica repo checkout <url>`.
 	taskCtx := execenv.TaskContextForEnv{
-		IssueID:           task.IssueID,
-		TriggerCommentID:  task.TriggerCommentID,
-		AgentID:           agentID,
-		AgentName:         agentName,
-		AgentInstructions: instructions,
-		AgentSkills:       convertSkillsForEnv(skills),
-		Repos:             convertReposForEnv(task.Repos),
-		ChatSessionID:     task.ChatSessionID,
+		IssueID:               task.IssueID,
+		TriggerCommentID:      task.TriggerCommentID,
+		TriggerCommentContent: task.TriggerCommentContent,
+		AgentID:               agentID,
+		AgentName:             agentName,
+		AgentInstructions:     instructions,
+		AgentSkills:           convertSkillsForEnv(skills),
+		Repos:                 convertReposForEnv(task.Repos),
+		ChatSessionID:         task.ChatSessionID,
+		TaskData:              buildTaskData(task, provider, agentName),
+		IssueData:             issueData,
+		CommentsData:          commentsData,
 	}
 
 	// Try to reuse the workdir from a previous task on the same (agent, issue) pair.
 	var env *execenv.Environment
-	codexVersion := d.agentVersion("codex")
 	if task.PriorWorkDir != "" {
-		env = execenv.Reuse(task.PriorWorkDir, provider, codexVersion, taskCtx, d.logger)
+		env = execenv.Reuse(task.PriorWorkDir, provider, taskCtx, d.logger)
 	}
 	if env == nil {
+		logPhase("env_prepare_start", "reused", false)
 		var err error
 		env, err = execenv.Prepare(execenv.PrepareParams{
 			WorkspacesRoot: d.cfg.WorkspacesRoot,
@@ -927,18 +938,22 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 			TaskID:         task.ID,
 			AgentName:      agentName,
 			Provider:       provider,
-			CodexVersion:   codexVersion,
 			Task:           taskCtx,
 		}, d.logger)
 		if err != nil {
 			return TaskResult{}, fmt.Errorf("prepare execution environment: %w", err)
 		}
+		logPhase("env_prepared", "reused", false, "workdir", env.WorkDir)
+	} else {
+		logPhase("env_prepared", "reused", true, "workdir", env.WorkDir)
 	}
 
 	// Inject runtime-specific config (meta skill) so the agent discovers .agent_context/.
+	logPhase("runtime_config_inject_start")
 	if err := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx); err != nil {
 		d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
 	}
+	logPhase("runtime_config_injected")
 	// NOTE: No cleanup — workdir is preserved for reuse by future tasks on
 	// the same (agent, issue) pair. The work_dir path is stored in DB on
 	// task completion and passed back via PriorWorkDir on the next claim.
@@ -991,6 +1006,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	if err != nil {
 		return TaskResult{}, fmt.Errorf("create agent backend: %w", err)
 	}
+	logPhase("backend_created")
 
 	reused := task.PriorWorkDir != "" && env.WorkDir == task.PriorWorkDir
 	taskLog.Info("starting agent",
@@ -1002,8 +1018,6 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	if task.PriorSessionID != "" {
 		taskLog.Info("resuming session", "session_id", task.PriorSessionID)
 	}
-
-	taskStart := time.Now()
 
 	var customArgs []string
 	if task.Agent != nil {
@@ -1089,10 +1103,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 // executeAndDrain runs a backend, drains its message stream (forwarding to the
 // server), and waits for the final result.
 func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, prompt string, opts agent.ExecOptions, taskLog *slog.Logger, taskID string) (agent.Result, int32, error) {
+	execStart := time.Now()
 	session, err := backend.Execute(ctx, prompt, opts)
 	if err != nil {
 		return agent.Result{}, 0, err
 	}
+	taskLog.Info("task phase", "phase", "session_started", "elapsed_ms", time.Since(execStart).Milliseconds())
 
 	// Create an independent drain deadline so we don't block forever if the
 	// backend's internal timeout fails to produce a Result (e.g. scanner
@@ -1113,6 +1129,9 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 		var pendingThinking strings.Builder
 		var batch []TaskMessageData
 		callIDToTool := map[string]string{}
+		var firstTextLogged atomic.Bool
+		var firstThinkingLogged atomic.Bool
+		var firstToolLogged atomic.Bool
 
 		flush := func() {
 			mu.Lock()
@@ -1170,6 +1189,9 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 				}
 				switch msg.Type {
 				case agent.MessageToolUse:
+					if firstToolLogged.CompareAndSwap(false, true) {
+						taskLog.Info("task phase", "phase", "first_tool_use", "elapsed_ms", time.Since(execStart).Milliseconds(), "tool", msg.Tool)
+					}
 					n := toolCount.Add(1)
 					taskLog.Info(fmt.Sprintf("tool #%d: %s", n, msg.Tool))
 					if msg.CallID != "" {
@@ -1208,12 +1230,18 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 					mu.Unlock()
 				case agent.MessageThinking:
 					if msg.Content != "" {
+						if firstThinkingLogged.CompareAndSwap(false, true) {
+							taskLog.Info("task phase", "phase", "first_thinking", "elapsed_ms", time.Since(execStart).Milliseconds())
+						}
 						mu.Lock()
 						pendingThinking.WriteString(msg.Content)
 						mu.Unlock()
 					}
 				case agent.MessageText:
 					if msg.Content != "" {
+						if firstTextLogged.CompareAndSwap(false, true) {
+							taskLog.Info("task phase", "phase", "first_text", "elapsed_ms", time.Since(execStart).Milliseconds())
+						}
 						taskLog.Debug("agent", "text", truncateLog(msg.Content, 200))
 						mu.Lock()
 						pendingText.WriteString(msg.Content)
@@ -1250,6 +1278,56 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 	}
 }
 
+func buildTaskData(task Task, provider, agentName string) map[string]any {
+	return map[string]any{
+		"id":                      task.ID,
+		"issue_id":                task.IssueID,
+		"workspace_id":            task.WorkspaceID,
+		"runtime_id":              task.RuntimeID,
+		"provider":                provider,
+		"agent_id":                task.AgentID,
+		"agent_name":              agentName,
+		"trigger_comment_id":      task.TriggerCommentID,
+		"trigger_comment_content": task.TriggerCommentContent,
+		"chat_session_id":         task.ChatSessionID,
+		"chat_message":            task.ChatMessage,
+		"prior_session_id":        task.PriorSessionID,
+		"prior_work_dir":          task.PriorWorkDir,
+	}
+}
+
+func (d *Daemon) fetchInitialTaskContextData(ctx context.Context, task Task, taskLog *slog.Logger, taskStart time.Time) (map[string]any, []map[string]any) {
+	if task.IssueID == "" {
+		return nil, nil
+	}
+
+	readCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	var issueData map[string]any
+	if issue, err := d.client.GetIssueData(readCtx, task.WorkspaceID, task.IssueID); err != nil {
+		taskLog.Warn("initial issue fetch failed, continuing with minimal context", "error", err)
+	} else {
+		issueData = issue
+	}
+
+	var commentsData []map[string]any
+	if comments, err := d.client.ListIssueCommentsData(readCtx, task.WorkspaceID, task.IssueID, 100); err != nil {
+		taskLog.Warn("initial comments fetch failed, continuing with empty comments context", "error", err)
+	} else {
+		commentsData = comments
+	}
+
+	taskLog.Info("task phase",
+		"phase", "local_context_fetched",
+		"elapsed_ms", time.Since(taskStart).Milliseconds(),
+		"issue_loaded", issueData != nil,
+		"comments_count", len(commentsData),
+	)
+
+	return issueData, commentsData
+}
+
 func mergeUsage(a, b map[string]agent.TokenUsage) map[string]agent.TokenUsage {
 	if len(a) == 0 {
 		return b
@@ -1279,6 +1357,35 @@ func repoDataToInfo(repos []RepoData) []repocache.RepoInfo {
 		info[i] = repocache.RepoInfo{URL: r.URL, Description: r.Description}
 	}
 	return info
+}
+
+func cloneRepoData(repos []RepoData) []RepoData {
+	if len(repos) == 0 {
+		return nil
+	}
+	cloned := make([]RepoData, len(repos))
+	copy(cloned, repos)
+	return cloned
+}
+
+func repoDataEquivalent(a, b []RepoData) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	seen := make(map[string]string, len(a))
+	for _, repo := range a {
+		seen[repo.URL] = repo.Description
+	}
+	for _, repo := range b {
+		desc, ok := seen[repo.URL]
+		if !ok || desc != repo.Description {
+			return false
+		}
+	}
+	return true
 }
 
 func convertReposForEnv(repos []RepoData) []execenv.RepoContextForEnv {

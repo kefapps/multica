@@ -25,20 +25,23 @@ type PrepareParams struct {
 	TaskID         string            // task UUID — used for directory name
 	AgentName      string            // for git branch naming only
 	Provider       string            // agent provider ("claude", "codex") — determines skill injection paths
-	CodexVersion   string            // detected Codex CLI version (only used when Provider == "codex")
 	Task           TaskContextForEnv // context data for writing files
 }
 
 // TaskContextForEnv is the subset of task context used for writing context files.
 type TaskContextForEnv struct {
-	IssueID           string
-	TriggerCommentID  string // comment that triggered this task (empty for on_assign)
-	AgentID           string // unique ID of the dispatched agent
-	AgentName         string
-	AgentInstructions string // agent identity/persona instructions, injected into CLAUDE.md
-	AgentSkills       []SkillContextForEnv
-	Repos             []RepoContextForEnv // workspace repos available for checkout
-	ChatSessionID     string              // non-empty for chat tasks
+	IssueID               string
+	TriggerCommentID      string // comment that triggered this task (empty for on_assign)
+	TriggerCommentContent string
+	AgentID               string // unique ID of the dispatched agent
+	AgentName             string
+	AgentInstructions     string // agent identity/persona instructions, injected into CLAUDE.md
+	AgentSkills           []SkillContextForEnv
+	Repos                 []RepoContextForEnv // workspace repos available for checkout
+	ChatSessionID         string              // non-empty for chat tasks
+	TaskData              map[string]any      // serialized to .agent_context/task.json
+	IssueData             map[string]any      // serialized to .agent_context/issue.json
+	CommentsData          []map[string]any    // serialized to .agent_context/comments.json
 }
 
 // SkillContextForEnv represents a skill to be written into the execution environment.
@@ -111,7 +114,13 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	// For Codex, set up a per-task CODEX_HOME seeded from ~/.codex/ with skills.
 	if params.Provider == "codex" {
 		codexHome := filepath.Join(envRoot, "codex-home")
-		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: params.CodexVersion}, logger); err != nil {
+		if err := prepareCodexHome(CodexHomeParams{
+			CodexHome:      codexHome,
+			WorkspacesRoot: params.WorkspacesRoot,
+			WorkspaceID:    params.WorkspaceID,
+			Repos:          params.Task.Repos,
+			Logger:         logger,
+		}); err != nil {
 			return nil, fmt.Errorf("execenv: prepare codex-home: %w", err)
 		}
 		if len(params.Task.AgentSkills) > 0 {
@@ -128,11 +137,7 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 
 // Reuse wraps an existing workdir into an Environment and refreshes context files.
 // Returns nil if the workdir does not exist (caller should fall back to Prepare).
-//
-// codexVersion is the detected Codex CLI version, used (only when provider is
-// "codex") to pick the right sandbox policy for the per-task config.toml.
-// Pass an empty string when the version is unknown.
-func Reuse(workDir, provider, codexVersion string, task TaskContextForEnv, logger *slog.Logger) *Environment {
+func Reuse(workDir, provider string, task TaskContextForEnv, logger *slog.Logger) *Environment {
 	if _, err := os.Stat(workDir); err != nil {
 		return nil
 	}
@@ -149,11 +154,17 @@ func Reuse(workDir, provider, codexVersion string, task TaskContextForEnv, logge
 	}
 
 	// Restore CodexHome for Codex provider — the per-task codex-home directory
-	// lives alongside the workdir. Re-run prepareCodexHomeWithOpts to ensure
-	// config (especially sandbox/network access) is up to date.
+	// lives alongside the workdir. Re-run prepareCodexHome to ensure config
+	// (especially network access) is up to date.
 	if provider == "codex" {
 		codexHome := filepath.Join(env.RootDir, "codex-home")
-		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: codexVersion}, logger); err != nil {
+		if err := prepareCodexHome(CodexHomeParams{
+			CodexHome:      codexHome,
+			WorkspacesRoot: filepath.Dir(filepath.Dir(env.RootDir)),
+			WorkspaceID:    filepath.Base(filepath.Dir(env.RootDir)),
+			Repos:          task.Repos,
+			Logger:         logger,
+		}); err != nil {
 			logger.Warn("execenv: refresh codex-home failed", "error", err)
 		} else {
 			env.CodexHome = codexHome

@@ -18,7 +18,8 @@ func BuildPrompt(task Task) string {
 	var b strings.Builder
 	b.WriteString("You are running as a local coding agent for a Multica workspace.\n\n")
 	fmt.Fprintf(&b, "Your assigned issue ID is: %s\n\n", task.IssueID)
-	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then complete it.\n", task.IssueID)
+	b.WriteString("Start by reading the injected files in `.agent_context/` (`issue_context.md`, `issue.json`, `comments.json`, `repos.json`, `task.json`). ")
+	b.WriteString("Only use `multica` CLI read commands when you need to refresh or extend that local context.\n")
 	return b.String()
 }
 
@@ -33,7 +34,8 @@ func buildCommentPrompt(task Task) string {
 		b.WriteString("[NEW COMMENT] A user just left a new comment that triggered this task. You MUST respond to THIS comment, not any previous ones:\n\n")
 		fmt.Fprintf(&b, "> %s\n\n", task.TriggerCommentContent)
 	}
-	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then complete it.\n", task.IssueID)
+	b.WriteString("Start by reading the injected files in `.agent_context/` (`issue_context.md`, `issue.json`, `comments.json`, `repos.json`, `task.json`). ")
+	b.WriteString("Only use `multica` CLI read commands when you need to refresh or extend that local context.\n")
 	return b.String()
 }
 

@@ -66,6 +66,24 @@ func TestBareDirName(t *testing.T) {
 	}
 }
 
+func TestWorktreeAdminDir(t *testing.T) {
+	t.Parallel()
+	got := WorktreeAdminDir("/tmp/cache", "ws-1", "https://github.com/org/my-repo.git")
+	want := filepath.Join("/tmp/cache", "ws-1", "my-repo.git", "worktrees", "my-repo")
+	if got != want {
+		t.Fatalf("WorktreeAdminDir() = %q, want %q", got, want)
+	}
+}
+
+func TestBareRepoDir(t *testing.T) {
+	t.Parallel()
+	got := BareRepoDir("/tmp/cache", "ws-1", "https://github.com/org/my-repo.git")
+	want := filepath.Join("/tmp/cache", "ws-1", "my-repo.git")
+	if got != want {
+		t.Fatalf("BareRepoDir() = %q, want %q", got, want)
+	}
+}
+
 func TestIsBareRepo(t *testing.T) {
 	t.Parallel()
 
@@ -263,6 +281,64 @@ func TestCreateWorktree(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(out)); got != result.BranchName {
 		t.Errorf("expected branch %q, got %q", result.BranchName, got)
+	}
+}
+
+func TestCreateWorktreeRemovesCompletedSiblingWorktree(t *testing.T) {
+	t.Parallel()
+
+	sourceRepo := createTestRepo(t)
+	cacheRoot := t.TempDir()
+
+	cache := New(cacheRoot, testLogger())
+	if err := cache.Sync("ws-1", []RepoInfo{{URL: sourceRepo}}); err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+
+	workspaceRoot := t.TempDir()
+	task1Root := filepath.Join(workspaceRoot, "ws-1", "task-1")
+	task1WorkDir := filepath.Join(task1Root, "workdir")
+	if err := os.MkdirAll(task1WorkDir, 0o755); err != nil {
+		t.Fatalf("mkdir task1 workdir: %v", err)
+	}
+	result1, err := cache.CreateWorktree(WorktreeParams{
+		WorkspaceID: "ws-1",
+		RepoURL:     sourceRepo,
+		WorkDir:     task1WorkDir,
+		AgentName:   "Runtime Fixer",
+		TaskID:      "11111111-1111-1111-1111-111111111111",
+	})
+	if err != nil {
+		t.Fatalf("first CreateWorktree failed: %v", err)
+	}
+	runGitAuthored(t, result1.Path, "checkout", "-b", "kef-75-canonical")
+	if err := os.WriteFile(filepath.Join(task1Root, ".gc_meta.json"), []byte(`{"issue_id":"KEF-75","workspace_id":"ws-1"}`), 0o644); err != nil {
+		t.Fatalf("write gc meta: %v", err)
+	}
+
+	task2Root := filepath.Join(workspaceRoot, "ws-1", "task-2")
+	task2WorkDir := filepath.Join(task2Root, "workdir")
+	if err := os.MkdirAll(task2WorkDir, 0o755); err != nil {
+		t.Fatalf("mkdir task2 workdir: %v", err)
+	}
+	result2, err := cache.CreateWorktree(WorktreeParams{
+		WorkspaceID: "ws-1",
+		RepoURL:     sourceRepo,
+		WorkDir:     task2WorkDir,
+		AgentName:   "Runtime Fixer",
+		TaskID:      "22222222-2222-2222-2222-222222222222",
+	})
+	if err != nil {
+		t.Fatalf("second CreateWorktree failed: %v", err)
+	}
+
+	if _, err := os.Stat(result1.Path); !os.IsNotExist(err) {
+		t.Fatalf("expected completed sibling worktree to be removed, stat err=%v", err)
+	}
+
+	cmd := exec.Command("git", "-C", result2.Path, "checkout", "kef-75-canonical")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout canonical branch after cleanup failed: %s: %v", out, err)
 	}
 }
 

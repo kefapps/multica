@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -140,6 +141,43 @@ func (c *Client) GetTaskStatus(ctx context.Context, taskID string) (string, erro
 	return resp.Status, nil
 }
 
+// GetIssueData fetches the raw issue payload as served by /api/issues/{id}.
+func (c *Client) GetIssueData(ctx context.Context, workspaceID, issueID string) (map[string]any, error) {
+	path := "/api/issues/" + issueID
+	if workspaceID != "" {
+		path += "?" + url.Values{"workspace_id": {workspaceID}}.Encode()
+	}
+	var issue map[string]any
+	if err := c.getJSON(ctx, path, &issue); err != nil {
+		return nil, err
+	}
+	return issue, nil
+}
+
+// ListIssueCommentsData fetches the raw issue comments payload with a bounded page size.
+func (c *Client) ListIssueCommentsData(ctx context.Context, workspaceID, issueID string, limit int) ([]map[string]any, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	params := url.Values{}
+	params.Set("limit", fmt.Sprintf("%d", limit))
+	if workspaceID != "" {
+		params.Set("workspace_id", workspaceID)
+	}
+	path := "/api/issues/" + issueID + "/comments?" + params.Encode()
+	var comments []map[string]any
+	if err := c.getJSON(ctx, path, &comments); err != nil {
+		return nil, err
+	}
+	return comments, nil
+}
+
+func (c *Client) ReportUsage(ctx context.Context, runtimeID string, entries []map[string]any) error {
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/usage", runtimeID), map[string]any{
+		"entries": entries,
+	}, nil)
+}
+
 // HeartbeatResponse contains the server's response to a heartbeat, including any pending actions.
 type HeartbeatResponse struct {
 	Status        string         `json:"status"`
@@ -177,10 +215,11 @@ func (c *Client) ReportUpdateResult(ctx context.Context, runtimeID, updateID str
 	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/update/%s/result", runtimeID, updateID), result, nil)
 }
 
-// WorkspaceInfo holds minimal workspace metadata returned by the API.
+// WorkspaceInfo holds workspace metadata returned by the API.
 type WorkspaceInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID    string     `json:"id"`
+	Name  string     `json:"name"`
+	Repos []RepoData `json:"repos"`
 }
 
 // ListWorkspaces fetches all workspaces the authenticated user belongs to.
@@ -215,28 +254,13 @@ func (c *Client) Deregister(ctx context.Context, runtimeIDs []string) error {
 
 // RegisterResponse holds the server's response to a daemon registration.
 type RegisterResponse struct {
-	Runtimes     []Runtime  `json:"runtimes"`
-	Repos        []RepoData `json:"repos"`
-	ReposVersion string     `json:"repos_version"`
+	Runtimes []Runtime  `json:"runtimes"`
+	Repos    []RepoData `json:"repos"`
 }
 
 func (c *Client) Register(ctx context.Context, req map[string]any) (*RegisterResponse, error) {
 	var resp RegisterResponse
 	if err := c.postJSON(ctx, "/api/daemon/register", req, &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-type WorkspaceReposResponse struct {
-	WorkspaceID  string     `json:"workspace_id"`
-	Repos        []RepoData `json:"repos"`
-	ReposVersion string     `json:"repos_version"`
-}
-
-func (c *Client) GetWorkspaceRepos(ctx context.Context, workspaceID string) (*WorkspaceReposResponse, error) {
-	var resp WorkspaceReposResponse
-	if err := c.getJSON(ctx, fmt.Sprintf("/api/daemon/workspaces/%s/repos", workspaceID), &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
