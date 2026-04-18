@@ -712,6 +712,7 @@ type codexClient struct {
 	turnStarted          bool
 	completedTurnIDs     map[string]bool
 	streamedAgentItems   map[string]bool
+	streamedToolItems    map[string]bool
 	diagnostics          *codexDiagnostics
 
 	usageMu sync.Mutex
@@ -1093,6 +1094,28 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 		}
 		return true, method + ":agentMessage"
 	}
+	if method == "item/commandExecution/outputDelta" {
+		itemID, _ := params["itemId"].(string)
+		delta, _ := params["delta"].(string)
+		if delta == "" {
+			return true, method + ":commandExecution"
+		}
+		if itemID != "" {
+			if c.streamedToolItems == nil {
+				c.streamedToolItems = make(map[string]bool)
+			}
+			c.streamedToolItems[itemID] = true
+		}
+		if c.onMessage != nil {
+			c.onMessage(Message{
+				Type:   MessageToolResult,
+				Tool:   "exec_command",
+				CallID: itemID,
+				Output: delta,
+			})
+		}
+		return true, method + ":commandExecution"
+	}
 
 	item, ok := params["item"].(map[string]any)
 	if !ok {
@@ -1121,7 +1144,12 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 
 	case method == "item/completed" && itemType == "commandExecution":
 		output, _ := item["aggregatedOutput"].(string)
-		if c.onMessage != nil {
+		streamed := false
+		if itemID != "" && c.streamedToolItems != nil {
+			streamed = c.streamedToolItems[itemID]
+			delete(c.streamedToolItems, itemID)
+		}
+		if c.onMessage != nil && !streamed {
 			c.onMessage(Message{
 				Type:   MessageToolResult,
 				Tool:   "exec_command",

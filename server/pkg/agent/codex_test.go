@@ -467,6 +467,57 @@ func TestCodexRawItemAgentMessageCompletedWithoutDeltaEmitsText(t *testing.T) {
 	}
 }
 
+func TestCodexRawCommandExecutionOutputDeltaSuppressesCompletedDuplicate(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.notificationProtocol = "raw"
+
+	var messages []Message
+	c.onMessage = func(msg Message) {
+		messages = append(messages, msg)
+	}
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"commandExecution","id":"call-1","command":"git status"}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/commandExecution/outputDelta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"call-1","delta":"on branch "}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/commandExecution/outputDelta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"call-1","delta":"main\n"}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","id":"call-1","aggregatedOutput":"on branch main\n"}}}`)
+
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d (%#v)", len(messages), messages)
+	}
+	if messages[0].Type != MessageToolUse || messages[0].Tool != "exec_command" || messages[0].CallID != "call-1" {
+		t.Fatalf("unexpected tool use message: %+v", messages[0])
+	}
+	if messages[1].Type != MessageToolResult || messages[1].CallID != "call-1" || messages[1].Output != "on branch " {
+		t.Fatalf("unexpected first delta message: %+v", messages[1])
+	}
+	if messages[2].Type != MessageToolResult || messages[2].CallID != "call-1" || messages[2].Output != "main\n" {
+		t.Fatalf("unexpected second delta message: %+v", messages[2])
+	}
+}
+
+func TestCodexRawCommandExecutionCompletedWithoutDeltaEmitsOutput(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.notificationProtocol = "raw"
+
+	var messages []Message
+	c.onMessage = func(msg Message) {
+		messages = append(messages, msg)
+	}
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","id":"call-1","aggregatedOutput":"done\n"}}}`)
+
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d (%#v)", len(messages), messages)
+	}
+	if messages[0].Type != MessageToolResult || messages[0].CallID != "call-1" || messages[0].Output != "done\n" {
+		t.Fatalf("unexpected tool result message: %+v", messages[0])
+	}
+}
+
 func TestCodexRawThreadStatusIdle(t *testing.T) {
 	t.Parallel()
 
