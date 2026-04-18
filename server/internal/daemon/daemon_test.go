@@ -326,6 +326,26 @@ func TestSelectPreferredRepoURLFromIssueDescriptionRepoSlug(t *testing.T) {
 	}
 }
 
+func TestSelectPreferredRepoURLDoesNotTreatDotMulticaPathAsRepoMention(t *testing.T) {
+	t.Parallel()
+
+	task := Task{
+		Repos: []RepoData{
+			{URL: "https://github.com/kefapps/roundtable", Description: "Roundtable fork repository"},
+			{URL: "https://github.com/kefapps/multica", Description: "Multica runtime fork repository"},
+			{URL: "https://github.com/kefapps/konfront", Description: "Konfront product repository"},
+		},
+	}
+	issueData := map[string]any{
+		"description": "Run Codex on konfront and verify that the daemon selects the konfront .multica/codex-task.toml overlay even when other workspace repos also expose repo overlays.",
+	}
+
+	got := selectPreferredRepoURL(task, issueData)
+	if got != "https://github.com/kefapps/konfront" {
+		t.Fatalf("selectPreferredRepoURL() = %q, want konfront repo URL without matching .multica path", got)
+	}
+}
+
 func TestSelectPreferredRepoURLReturnsEmptyOnAmbiguousAlias(t *testing.T) {
 	t.Parallel()
 

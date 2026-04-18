@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1411,8 +1412,7 @@ func selectPreferredRepoURL(task Task, issueData map[string]any) string {
 
 	matches := make(map[string]struct{})
 	for _, text := range candidates {
-		normalizedText := normalizeRepoSelectionText(text)
-		if normalizedText == "" {
+		if normalizeRepoSelectionText(text) == "" {
 			continue
 		}
 		for _, repo := range task.Repos {
@@ -1424,7 +1424,7 @@ func selectPreferredRepoURL(task Task, issueData map[string]any) string {
 				if alias == "" {
 					continue
 				}
-				if normalizedRepoSelectionContains(normalizedText, alias) {
+				if repoSelectionTextMatchesAlias(text, alias) {
 					matches[repoURL] = struct{}{}
 					break
 				}
@@ -1480,7 +1480,7 @@ func issueTitle(issueData map[string]any) (string, bool) {
 func repoSelectionAliases(repo RepoData) []string {
 	aliases := []string{}
 	pushAlias := func(value string) {
-		value = normalizeRepoSelectionText(value)
+		value = strings.ToLower(strings.TrimSpace(value))
 		if value == "" {
 			return
 		}
@@ -1530,11 +1530,16 @@ func normalizeRepoSelectionText(value string) string {
 	return strings.TrimSpace(b.String())
 }
 
-func normalizedRepoSelectionContains(normalizedText, normalizedAlias string) bool {
-	if normalizedText == "" || normalizedAlias == "" {
+func repoSelectionTextMatchesAlias(text, alias string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	alias = strings.ToLower(strings.TrimSpace(alias))
+	if text == "" || alias == "" {
 		return false
 	}
-	return strings.Contains(" "+normalizedText+" ", " "+normalizedAlias+" ")
+	pattern := regexp.QuoteMeta(alias)
+	pattern = strings.ReplaceAll(pattern, `\ `, `\s+`)
+	re := regexp.MustCompile(`(^|[^a-z0-9_./-])` + pattern + `([^a-z0-9_./-]|$)`)
+	return re.FindStringIndex(text) != nil
 }
 
 // shortID returns the first 8 characters of an ID for readable logs.
