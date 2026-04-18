@@ -1060,6 +1060,17 @@ func (c *codexClient) handleRawNotification(method string, params map[string]any
 			}
 		}
 
+	case "thread/tokenUsage/updated":
+		if thread, ok := params["thread"].(map[string]any); ok {
+			c.extractUsageFromMap(thread)
+		}
+		c.extractUsageFromMap(params)
+
+	case "account/rateLimits/updated", "turn/diff/updated":
+		// Metadata-only notifications. They are useful for diagnostics, but they
+		// do not correspond to user-visible output or completion semantics.
+		return
+
 	default:
 		if strings.HasPrefix(method, "item/") {
 			if handled, detail := c.handleItemNotification(method, params); !handled && c.diagnostics != nil {
@@ -1130,6 +1141,19 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 	}
 
 	switch {
+	case method == "item/started" && itemType == "agentMessage":
+		// Agent message lifecycle starts before any deltas or final completion.
+		// The user-visible content is emitted by delta/completed notifications.
+		return true, detail
+
+	case method == "item/started" && itemType == "reasoning":
+		// Reasoning events are internal lifecycle notices. They should not count
+		// as unhandled noise in diagnostics.
+		return true, detail
+
+	case method == "item/completed" && itemType == "reasoning":
+		return true, detail
+
 	case method == "item/started" && itemType == "commandExecution":
 		command, _ := item["command"].(string)
 		if c.onMessage != nil {

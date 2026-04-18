@@ -775,6 +775,53 @@ func TestCodexDiagnosticsCaptureUnhandledNotification(t *testing.T) {
 	}
 }
 
+func TestCodexRawMetadataNotificationsAreIgnored(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.notificationProtocol = "raw"
+	c.diagnostics = newCodexDiagnostics(time.Unix(0, 0))
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"account/rateLimits/updated","params":{"limits":{"remaining":42}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"thread":{"usage":{"input_tokens":12,"output_tokens":3}}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"turn/diff/updated","params":{"turn":{"id":"turn-1"},"diff":{"summary":"..."}}}`)
+
+	snapshot := c.diagnostics.snapshot(c.notificationProtocol, c.turnStarted, c.turnID, len(c.completedTurnIDs))
+	if got := snapshot["notification_count"]; got != 3 {
+		t.Fatalf("expected notification_count=3, got %v", got)
+	}
+	if got := snapshot["unhandled_notification_count"]; got != 0 {
+		t.Fatalf("expected unhandled_notification_count=0, got %v", got)
+	}
+	if c.usage.InputTokens != 12 || c.usage.OutputTokens != 3 {
+		t.Fatalf("expected usage to be updated from tokenUsage event, got %+v", c.usage)
+	}
+}
+
+func TestCodexRawInternalItemLifecycleIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.notificationProtocol = "raw"
+	c.diagnostics = newCodexDiagnostics(time.Unix(0, 0))
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"agentMessage","id":"msg-1","phase":"commentary"}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"reasoning","id":"reason-1"}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"reasoning","id":"reason-1"}}}`)
+
+	snapshot := c.diagnostics.snapshot(c.notificationProtocol, c.turnStarted, c.turnID, len(c.completedTurnIDs))
+	if got := snapshot["notification_count"]; got != 3 {
+		t.Fatalf("expected notification_count=3, got %v", got)
+	}
+	if got := snapshot["unhandled_notification_count"]; got != 0 {
+		t.Fatalf("expected unhandled_notification_count=0, got %v", got)
+	}
+	events, _ := snapshot["recent_unhandled_events"].([]string)
+	if len(events) != 0 {
+		t.Fatalf("expected no recent unhandled events, got %#v", events)
+	}
+}
+
 func TestCodexShouldPersistDiagnosticsForSilentTurn(t *testing.T) {
 	t.Parallel()
 
