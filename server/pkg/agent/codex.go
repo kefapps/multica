@@ -57,9 +57,11 @@ type codexDiagnostics struct {
 
 	firstLineMs         int64
 	firstNotificationMs int64
+	firstStderrMs       int64
 	turnStartedMs       int64
 	firstMappedMsgMs    int64
 	lastLineMs          int64
+	lastStderrMs        int64
 	lastMappedMsgMs     int64
 
 	recentNotificationMethods []string
@@ -67,10 +69,12 @@ type codexDiagnostics struct {
 	recentUnhandledEvents     []string
 	recentUnhandledRawLines   []string
 	recentRawLines            []string
+	recentStderrLines         []string
 	notificationMethodCounts  map[string]int
 	itemLifecycleCounts       map[string]int
 	recentItemLifecycleEvents []string
 	messageCounts             map[MessageType]int
+	stderrCategoryCounts      map[string]int
 
 	lastRawLine       string
 	lastMalformedLine string
@@ -82,12 +86,15 @@ func newCodexDiagnostics(start time.Time) *codexDiagnostics {
 		start:                    start,
 		firstLineMs:              -1,
 		firstNotificationMs:      -1,
+		firstStderrMs:            -1,
 		turnStartedMs:            -1,
 		firstMappedMsgMs:         -1,
+		lastStderrMs:             -1,
 		lastMappedMsgMs:          -1,
 		notificationMethodCounts: make(map[string]int),
 		itemLifecycleCounts:      make(map[string]int),
 		messageCounts:            make(map[MessageType]int),
+		stderrCategoryCounts:     make(map[string]int),
 	}
 }
 
@@ -137,6 +144,27 @@ func (d *codexDiagnostics) noteMalformedLine(line string) {
 		line = line[:200]
 	}
 	d.lastMalformedLine = line
+}
+
+func (d *codexDiagnostics) noteStderrLine(now time.Time, line string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	elapsed := d.elapsedMs(now)
+	if d.firstStderrMs < 0 {
+		d.firstStderrMs = elapsed
+	}
+	d.lastStderrMs = elapsed
+	if len(line) > codexDiagnosticRawLineMaxBytes {
+		line = line[:codexDiagnosticRawLineMaxBytes] + "...(truncated)"
+	}
+	d.pushRecent(&d.recentStderrLines, line)
+	d.stderrCategoryCounts["stderr_line"]++
+	if strings.Contains(line, "responses_websocket") {
+		d.stderrCategoryCounts["responses_websocket_error"]++
+	}
+	if strings.Contains(line, "UnknownIssuer") {
+		d.stderrCategoryCounts["unknown_issuer"]++
+	}
 }
 
 func (d *codexDiagnostics) noteResponse() {
@@ -246,6 +274,10 @@ func (d *codexDiagnostics) snapshot(protocol string, turnStarted bool, turnID st
 	for key, count := range d.itemLifecycleCounts {
 		itemLifecycleCounts[key] = count
 	}
+	stderrCategoryCounts := make(map[string]any, len(d.stderrCategoryCounts))
+	for key, count := range d.stderrCategoryCounts {
+		stderrCategoryCounts[key] = count
+	}
 
 	snapshot := map[string]any{
 		"protocol":                     protocol,
@@ -262,19 +294,23 @@ func (d *codexDiagnostics) snapshot(protocol string, turnStarted bool, turnID st
 		"completed_turn_count":         completedTurnCount,
 		"first_line_ms":                d.firstLineMs,
 		"first_notification_ms":        d.firstNotificationMs,
+		"first_stderr_ms":              d.firstStderrMs,
 		"turn_started_ms":              d.turnStartedMs,
 		"first_mapped_message_ms":      d.firstMappedMsgMs,
 		"last_line_ms":                 d.lastLineMs,
+		"last_stderr_ms":               d.lastStderrMs,
 		"last_mapped_message_ms":       d.lastMappedMsgMs,
 		"recent_notification_methods":  append([]string(nil), d.recentNotificationMethods...),
 		"recent_legacy_event_types":    append([]string(nil), d.recentLegacyEventTypes...),
 		"recent_unhandled_events":      append([]string(nil), d.recentUnhandledEvents...),
 		"recent_unhandled_raw_lines":   append([]string(nil), d.recentUnhandledRawLines...),
 		"recent_raw_lines":             append([]string(nil), d.recentRawLines...),
+		"recent_stderr_lines":          append([]string(nil), d.recentStderrLines...),
 		"notification_method_counts":   notificationMethodCounts,
 		"item_lifecycle_counts":        itemLifecycleCounts,
 		"recent_item_lifecycle_events": append([]string(nil), d.recentItemLifecycleEvents...),
 		"message_counts":               messageCounts,
+		"stderr_category_counts":       stderrCategoryCounts,
 	}
 	if d.lastMalformedLine != "" {
 		snapshot["last_malformed_line"] = d.lastMalformedLine
@@ -300,6 +336,14 @@ func codexDiagnosticsSummary(snapshot map[string]any) string {
 	if forced, _ := snapshot["silent_turn_forced"].(bool); forced {
 		parts = append(parts, "silent_turn_forced=true")
 	}
+	if counts, ok := snapshot["stderr_category_counts"].(map[string]any); ok {
+		if n, ok := counts["responses_websocket_error"].(int); ok && n > 0 {
+			parts = append(parts, fmt.Sprintf("stderr_ws_errors=%d", n))
+		}
+		if n, ok := counts["unknown_issuer"].(int); ok && n > 0 {
+			parts = append(parts, fmt.Sprintf("stderr_unknown_issuer=%d", n))
+		}
+	}
 	if methods, ok := snapshot["recent_notification_methods"].([]string); ok && len(methods) > 0 {
 		parts = append(parts, fmt.Sprintf("recent_methods=%s", strings.Join(methods, ",")))
 	}
@@ -321,6 +365,14 @@ func codexShouldPersistDiagnostics(snapshot map[string]any) bool {
 	}
 	if count, _ := snapshot["malformed_line_count"].(int); count > 0 {
 		return true
+	}
+	if counts, ok := snapshot["stderr_category_counts"].(map[string]any); ok {
+		if n, ok := counts["responses_websocket_error"].(int); ok && n > 0 {
+			return true
+		}
+		if n, ok := counts["unknown_issuer"].(int); ok && n > 0 {
+			return true
+		}
 	}
 	if turnStarted, _ := snapshot["turn_started_seen"].(bool); !turnStarted {
 		return false
@@ -348,6 +400,14 @@ func codexShouldSurfaceDiagnostics(snapshot map[string]any) bool {
 	}
 	if count, _ := snapshot["malformed_line_count"].(int); count > 0 {
 		return true
+	}
+	if counts, ok := snapshot["stderr_category_counts"].(map[string]any); ok {
+		if n, ok := counts["responses_websocket_error"].(int); ok && n > 0 {
+			return true
+		}
+		if n, ok := counts["unknown_issuer"].(int); ok && n > 0 {
+			return true
+		}
 	}
 	if artifactPath, _ := snapshot["diagnostic_artifact_path"].(string); artifactPath != "" {
 		return true
@@ -422,7 +482,10 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		cancel()
 		return nil, fmt.Errorf("codex stdin pipe: %w", err)
 	}
-	cmd.Stderr = newLogWriter(b.cfg.Logger, "[codex:stderr] ")
+	diagnostics := newCodexDiagnostics(time.Now())
+	cmd.Stderr = newLogWriterWithCallback(b.cfg.Logger, "[codex:stderr] ", func(text string) {
+		diagnostics.noteStderrLine(time.Now(), text)
+	})
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -433,7 +496,6 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 
 	msgCh := make(chan Message, 256)
 	resCh := make(chan Result, 1)
-	diagnostics := newCodexDiagnostics(time.Now())
 
 	var outputMu sync.Mutex
 	var output strings.Builder

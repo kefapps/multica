@@ -940,7 +940,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	backend, err := agent.New(provider, agent.Config{
 		ExecutablePath: entry.Path,
 		Env:            agentEnv,
-		Logger:         d.logger,
+		Logger:         taskLog,
 	})
 	if err != nil {
 		return TaskResult{}, fmt.Errorf("create agent backend: %w", err)

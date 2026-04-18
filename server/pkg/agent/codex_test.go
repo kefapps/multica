@@ -1089,6 +1089,36 @@ func TestCodexDiagnosticsSnapshotIncludesItemLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestCodexDiagnosticsSnapshotIncludesStderrCategories(t *testing.T) {
+	t.Parallel()
+
+	d := newCodexDiagnostics(time.Unix(0, 0))
+	d.noteStderrLine(time.Unix(0, int64(25*time.Millisecond)), "ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket")
+	d.noteStderrLine(time.Unix(0, int64(50*time.Millisecond)), "ERROR codex_api::endpoint::responses_websocket: invalid peer certificate: UnknownIssuer")
+
+	snapshot := d.snapshot("raw", true, "turn-1", 0)
+	if got := snapshot["first_stderr_ms"]; got != int64(25) {
+		t.Fatalf("expected first_stderr_ms=25, got %v", got)
+	}
+	if got := snapshot["last_stderr_ms"]; got != int64(50) {
+		t.Fatalf("expected last_stderr_ms=50, got %v", got)
+	}
+	counts, _ := snapshot["stderr_category_counts"].(map[string]any)
+	if got := counts["stderr_line"]; got != 2 {
+		t.Fatalf("expected stderr_line count=2, got %v", got)
+	}
+	if got := counts["responses_websocket_error"]; got != 2 {
+		t.Fatalf("expected responses_websocket_error count=2, got %v", got)
+	}
+	if got := counts["unknown_issuer"]; got != 1 {
+		t.Fatalf("expected unknown_issuer count=1, got %v", got)
+	}
+	recent, _ := snapshot["recent_stderr_lines"].([]string)
+	if len(recent) != 2 {
+		t.Fatalf("expected 2 recent stderr lines, got %#v", recent)
+	}
+}
+
 func TestCodexShouldPersistDiagnosticsForSilentTurn(t *testing.T) {
 	t.Parallel()
 
@@ -1127,6 +1157,28 @@ func TestCodexShouldSurfaceDiagnosticsForUnhandledNotification(t *testing.T) {
 	}
 	if !codexShouldSurfaceDiagnostics(snapshot) {
 		t.Fatal("expected suspicious diagnostics to be surfaced")
+	}
+}
+
+func TestCodexShouldSurfaceDiagnosticsForUnknownIssuer(t *testing.T) {
+	t.Parallel()
+
+	snapshot := map[string]any{
+		"unhandled_notification_count": 0,
+		"malformed_line_count":         0,
+		"stderr_category_counts": map[string]any{
+			"responses_websocket_error": 2,
+			"unknown_issuer":            1,
+		},
+		"message_counts": map[string]any{
+			string(MessageText): 1,
+		},
+	}
+	if !codexShouldPersistDiagnostics(snapshot) {
+		t.Fatal("expected websocket transport diagnostics to be persisted")
+	}
+	if !codexShouldSurfaceDiagnostics(snapshot) {
+		t.Fatal("expected websocket transport diagnostics to be surfaced")
 	}
 }
 

@@ -347,9 +347,9 @@ func trySend(ch chan<- Message, msg Message) {
 // overridden by user-configured custom_args. Overriding these would break
 // the daemon↔Claude communication protocol.
 var claudeBlockedArgs = map[string]blockedArgMode{
-	"-p":               blockedStandalone, // non-interactive mode
-	"--output-format":  blockedWithValue,  // stream-json protocol
-	"--input-format":   blockedWithValue,  // stream-json protocol
+	"-p":                blockedStandalone, // non-interactive mode
+	"--output-format":   blockedWithValue,  // stream-json protocol
+	"--input-format":    blockedWithValue,  // stream-json protocol
 	"--permission-mode": blockedWithValue,  // bypassPermissions for autonomous operation
 }
 
@@ -438,7 +438,7 @@ func isFilteredChildEnvKey(key string) bool {
 type blockedArgMode int
 
 const (
-	blockedWithValue blockedArgMode = iota // flag takes a value (next arg or =value)
+	blockedWithValue  blockedArgMode = iota // flag takes a value (next arg or =value)
 	blockedStandalone                       // flag is boolean, no value
 )
 
@@ -493,15 +493,23 @@ func detectCLIVersion(ctx context.Context, execPath string) (string, error) {
 type logWriter struct {
 	logger *slog.Logger
 	prefix string
+	onLog  func(string)
 }
 
 func newLogWriter(logger *slog.Logger, prefix string) *logWriter {
-	return &logWriter{logger: logger, prefix: prefix}
+	return newLogWriterWithCallback(logger, prefix, nil)
+}
+
+func newLogWriterWithCallback(logger *slog.Logger, prefix string, onLog func(string)) *logWriter {
+	return &logWriter{logger: logger, prefix: prefix, onLog: onLog}
 }
 
 func (w *logWriter) Write(p []byte) (int, error) {
 	text := strings.TrimSpace(string(p))
 	if text != "" {
+		if w.onLog != nil {
+			w.onLog(text)
+		}
 		w.logger.Debug(w.prefix + text)
 	}
 	return len(p), nil
