@@ -518,6 +518,55 @@ func TestCodexRawCommandExecutionCompletedWithoutDeltaEmitsOutput(t *testing.T) 
 	}
 }
 
+func TestCodexRawCommandExecutionTerminalInteractionEmptyIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.notificationProtocol = "raw"
+
+	var messages []Message
+	c.onMessage = func(msg Message) {
+		messages = append(messages, msg)
+	}
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/commandExecution/terminalInteraction","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"call-1","processId":"123","stdin":""}}`)
+
+	if len(messages) != 0 {
+		t.Fatalf("expected no user-visible messages, got %d (%#v)", len(messages), messages)
+	}
+	if c.diagnostics == nil {
+		return
+	}
+	snapshot := c.diagnostics.snapshot(c.notificationProtocol, c.turnStarted, c.turnID, len(c.completedTurnIDs))
+	if got, _ := snapshot["unhandled_notification_count"].(int); got != 0 {
+		t.Fatalf("expected no unhandled notifications, got %v", got)
+	}
+}
+
+func TestCodexRawCommandExecutionTerminalInteractionWithStdinEmitsLog(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.notificationProtocol = "raw"
+
+	var messages []Message
+	c.onMessage = func(msg Message) {
+		messages = append(messages, msg)
+	}
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/commandExecution/terminalInteraction","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"call-1","processId":"123","stdin":"y\n"}}`)
+
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d (%#v)", len(messages), messages)
+	}
+	if messages[0].Type != MessageLog || messages[0].Level != "info" {
+		t.Fatalf("expected info log message, got %+v", messages[0])
+	}
+	if !strings.Contains(messages[0].Content, `call-1`) || !strings.Contains(messages[0].Content, `"y\n"`) {
+		t.Fatalf("unexpected log content: %q", messages[0].Content)
+	}
+}
+
 func TestCodexRawThreadStatusIdle(t *testing.T) {
 	t.Parallel()
 
@@ -889,6 +938,24 @@ func TestCodexDiagnosticsSnapshotIncludesRecentRawLines(t *testing.T) {
 	}
 	if !strings.HasSuffix(rawLines[1], "...(truncated)") {
 		t.Fatalf("expected second raw line to be truncated, got %q", rawLines[1])
+	}
+}
+
+func TestCodexDiagnosticsSnapshotIncludesUnhandledRawLine(t *testing.T) {
+	t.Parallel()
+
+	d := newCodexDiagnostics(time.Unix(0, 0))
+	d.noteLine(time.Unix(0, 0))
+	d.noteRawLine(`{"method":"item/commandExecution/terminalInteraction","params":{"item":{"id":"call-1"}}}`)
+	d.noteUnhandledEvent("item/commandExecution/terminalInteraction")
+
+	snapshot := d.snapshot("raw", true, "turn-1", 0)
+	unhandled, _ := snapshot["recent_unhandled_raw_lines"].([]string)
+	if len(unhandled) != 1 {
+		t.Fatalf("expected 1 unhandled raw line, got %#v", unhandled)
+	}
+	if !strings.Contains(unhandled[0], `item/commandExecution/terminalInteraction => {"method":"item/commandExecution/terminalInteraction"`) {
+		t.Fatalf("unexpected unhandled raw line payload: %q", unhandled[0])
 	}
 }
 

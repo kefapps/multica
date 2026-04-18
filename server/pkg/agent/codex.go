@@ -65,9 +65,11 @@ type codexDiagnostics struct {
 	recentNotificationMethods []string
 	recentLegacyEventTypes    []string
 	recentUnhandledEvents     []string
+	recentUnhandledRawLines   []string
 	recentRawLines            []string
 	messageCounts             map[MessageType]int
 
+	lastRawLine       string
 	lastMalformedLine string
 	lastReaderError   string
 }
@@ -115,6 +117,7 @@ func (d *codexDiagnostics) noteRawLine(line string) {
 	if len(line) > codexDiagnosticRawLineMaxBytes {
 		line = line[:codexDiagnosticRawLineMaxBytes] + "...(truncated)"
 	}
+	d.lastRawLine = line
 	d.pushRecent(&d.recentRawLines, line)
 	if len(d.recentRawLines) > codexDiagnosticRawLineLimit {
 		d.recentRawLines = append([]string(nil), d.recentRawLines[len(d.recentRawLines)-codexDiagnosticRawLineLimit:]...)
@@ -170,6 +173,9 @@ func (d *codexDiagnostics) noteUnhandledEvent(detail string) {
 	defer d.mu.Unlock()
 	d.unhandledNotificationCount++
 	d.pushRecent(&d.recentUnhandledEvents, detail)
+	if d.lastRawLine != "" {
+		d.pushRecent(&d.recentUnhandledRawLines, detail+" => "+d.lastRawLine)
+	}
 }
 
 func (d *codexDiagnostics) noteTurnStarted(now time.Time) {
@@ -231,6 +237,7 @@ func (d *codexDiagnostics) snapshot(protocol string, turnStarted bool, turnID st
 		"recent_notification_methods":  append([]string(nil), d.recentNotificationMethods...),
 		"recent_legacy_event_types":    append([]string(nil), d.recentLegacyEventTypes...),
 		"recent_unhandled_events":      append([]string(nil), d.recentUnhandledEvents...),
+		"recent_unhandled_raw_lines":   append([]string(nil), d.recentUnhandledRawLines...),
 		"recent_raw_lines":             append([]string(nil), d.recentRawLines...),
 		"message_counts":               messageCounts,
 	}
@@ -1152,6 +1159,21 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 			})
 		}
 		return true, method + ":commandExecution"
+	}
+	if method == "item/commandExecution/terminalInteraction" {
+		itemID, _ := params["itemId"].(string)
+		stdin, _ := params["stdin"].(string)
+		if strings.TrimSpace(stdin) == "" {
+			return true, method + ":empty"
+		}
+		if c.onMessage != nil {
+			c.onMessage(Message{
+				Type:    MessageLog,
+				Level:   "info",
+				Content: fmt.Sprintf("codex terminal interaction for %s: %q", itemID, stdin),
+			})
+		}
+		return true, method + ":stdin"
 	}
 
 	item, ok := params["item"].(map[string]any)
