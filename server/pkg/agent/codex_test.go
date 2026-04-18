@@ -709,7 +709,7 @@ func TestCodexProtocolDetectionLegacyBlocksRaw(t *testing.T) {
 	}
 }
 
-func TestCodexExecuteCompletesAfterSilentIdle(t *testing.T) {
+func TestCodexExecuteSilentIdleAfterTextPersistsDiagnostics(t *testing.T) {
 	t.Helper()
 
 	oldGrace := codexSilentTurnGracePeriod
@@ -797,8 +797,15 @@ for line in sys.stdin:
 	if len(result.Diagnostics) == 0 {
 		t.Fatal("expected diagnostics snapshot to be attached")
 	}
-	if artifactPath, _ := result.Diagnostics["diagnostic_artifact_path"].(string); artifactPath != "" {
-		t.Fatalf("did not expect diagnostic artifact for healthy run, got %q", artifactPath)
+	if forced, _ := result.Diagnostics["silent_turn_forced"].(bool); !forced {
+		t.Fatalf("expected silent_turn_forced=true, got diagnostics=%#v", result.Diagnostics)
+	}
+	artifactPath, _ := result.Diagnostics["diagnostic_artifact_path"].(string)
+	if artifactPath == "" {
+		t.Fatal("expected diagnostic artifact for silent idle after partial text")
+	}
+	if _, err := os.Stat(artifactPath); err != nil {
+		t.Fatalf("expected diagnostic artifact to exist: %v", err)
 	}
 }
 
@@ -1096,6 +1103,26 @@ func TestCodexShouldSurfaceDiagnosticsForUnhandledNotification(t *testing.T) {
 	}
 }
 
+func TestCodexShouldPersistDiagnosticsForForcedSilentTurnWithPriorText(t *testing.T) {
+	t.Parallel()
+
+	snapshot := map[string]any{
+		"silent_turn_forced":           true,
+		"turn_started_seen":            true,
+		"unhandled_notification_count": 0,
+		"malformed_line_count":         0,
+		"message_counts": map[string]any{
+			string(MessageText): 3,
+		},
+	}
+	if !codexShouldPersistDiagnostics(snapshot) {
+		t.Fatal("expected forced silent turn diagnostics to be persisted even after prior text output")
+	}
+	if !codexShouldSurfaceDiagnostics(snapshot) {
+		t.Fatal("expected forced silent turn diagnostics to be surfaced")
+	}
+}
+
 func TestCodexExecuteSilentRunPersistsDiagnostics(t *testing.T) {
 	oldGrace := codexSilentTurnGracePeriod
 	oldPoll := codexSilentTurnPollInterval
@@ -1185,5 +1212,104 @@ for line in sys.stdin:
 	}
 	if _, err := os.Stat(artifactPath); err != nil {
 		t.Fatalf("expected diagnostic artifact to exist: %v", err)
+	}
+}
+
+func TestCodexExecuteSilentRunAfterTextPersistsAndSurfacesDiagnostics(t *testing.T) {
+	oldGrace := codexSilentTurnGracePeriod
+	oldPoll := codexSilentTurnPollInterval
+	oldShutdown := codexShutdownGracePeriod
+	oldForced := codexForcedShutdownWait
+	codexSilentTurnGracePeriod = 150 * time.Millisecond
+	codexSilentTurnPollInterval = 25 * time.Millisecond
+	codexShutdownGracePeriod = 250 * time.Millisecond
+	codexForcedShutdownWait = 100 * time.Millisecond
+	t.Cleanup(func() {
+		codexSilentTurnGracePeriod = oldGrace
+		codexSilentTurnPollInterval = oldPoll
+		codexShutdownGracePeriod = oldShutdown
+		codexForcedShutdownWait = oldForced
+	})
+
+	tmpDir := t.TempDir()
+	execPath := filepath.Join(tmpDir, "codex")
+	script := `#!/usr/bin/env python3
+import json
+import sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+    elif method == "thread/start":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"thread": {"id": "thread-1"}}})
+    elif method == "turn/start":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"ok": True}})
+        send({"jsonrpc": "2.0", "method": "turn/started", "params": {"turn": {"id": "turn-1"}}})
+        send({"jsonrpc": "2.0", "method": "item/completed", "params": {"item": {"type": "agentMessage", "id": "msg-1", "text": "partial progress"}}})
+`
+	if err := os.WriteFile(execPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex executable: %v", err)
+	}
+
+	backend := &codexBackend{
+		cfg: Config{
+			ExecutablePath: execPath,
+			Logger:         slog.Default(),
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	session, err := backend.Execute(ctx, "diagnose the issue", ExecOptions{
+		Cwd:     tmpDir,
+		Timeout: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var sawSilentLog bool
+	var sawFinalDiagnosticsLog bool
+	for msg := range session.Messages {
+		if msg.Type != MessageLog {
+			continue
+		}
+		if strings.Contains(msg.Content, "codex silent turn diagnostics:") {
+			sawSilentLog = true
+		}
+		if strings.Contains(msg.Content, "codex run diagnostics:") && strings.Contains(msg.Content, "artifact=") {
+			sawFinalDiagnosticsLog = true
+		}
+	}
+
+	result := <-session.Result
+	if result.Status != "completed" {
+		t.Fatalf("expected completed status, got %q (error=%q)", result.Status, result.Error)
+	}
+	if forced, _ := result.Diagnostics["silent_turn_forced"].(bool); !forced {
+		t.Fatalf("expected silent_turn_forced=true, got diagnostics=%#v", result.Diagnostics)
+	}
+	artifactPath, _ := result.Diagnostics["diagnostic_artifact_path"].(string)
+	if artifactPath == "" {
+		t.Fatal("expected diagnostic artifact path for forced silent turn")
+	}
+	if _, err := os.Stat(artifactPath); err != nil {
+		t.Fatalf("expected diagnostic artifact to exist: %v", err)
+	}
+	if !sawSilentLog {
+		t.Fatal("expected silent-turn watchdog log to be emitted")
+	}
+	if !sawFinalDiagnosticsLog {
+		t.Fatal("expected final surfaced diagnostics log with artifact path")
 	}
 }

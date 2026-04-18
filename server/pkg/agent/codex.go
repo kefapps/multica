@@ -270,6 +270,9 @@ func codexDiagnosticsSummary(snapshot map[string]any) string {
 		fmt.Sprintf("unhandled=%v", snapshot["unhandled_notification_count"]),
 		fmt.Sprintf("turn_started=%v", snapshot["turn_started_seen"]),
 	}
+	if forced, _ := snapshot["silent_turn_forced"].(bool); forced {
+		parts = append(parts, "silent_turn_forced=true")
+	}
 	if methods, ok := snapshot["recent_notification_methods"].([]string); ok && len(methods) > 0 {
 		parts = append(parts, fmt.Sprintf("recent_methods=%s", strings.Join(methods, ",")))
 	}
@@ -282,6 +285,9 @@ func codexDiagnosticsSummary(snapshot map[string]any) string {
 func codexShouldPersistDiagnostics(snapshot map[string]any) bool {
 	if len(snapshot) == 0 {
 		return false
+	}
+	if forced, _ := snapshot["silent_turn_forced"].(bool); forced {
+		return true
 	}
 	if count, _ := snapshot["unhandled_notification_count"].(int); count > 0 {
 		return true
@@ -306,6 +312,9 @@ func codexShouldPersistDiagnostics(snapshot map[string]any) bool {
 func codexShouldSurfaceDiagnostics(snapshot map[string]any) bool {
 	if len(snapshot) == 0 {
 		return false
+	}
+	if forced, _ := snapshot["silent_turn_forced"].(bool); forced {
+		return true
 	}
 	if count, _ := snapshot["unhandled_notification_count"].(int); count > 0 {
 		return true
@@ -403,6 +412,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 	var output strings.Builder
 	var inFlightTools atomic.Int32
 	var sawActivity atomic.Bool
+	var silentTurnForced atomic.Bool
 	var lastActivity atomic.Int64
 	markActivity := func() {
 		sawActivity.Store(true)
@@ -581,6 +591,8 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 						"idle_ms", idleFor.Milliseconds(),
 					)
 					snapshot := diagnostics.snapshot(c.notificationProtocol, c.turnStarted, c.turnID, len(c.completedTurnIDs))
+					silentTurnForced.Store(true)
+					snapshot["silent_turn_forced"] = true
 					summary := codexDiagnosticsSummary(snapshot)
 					b.cfg.Logger.Warn("codex silent turn diagnostics", "pid", cmd.Process.Pid, "summary", summary, "diagnostics", snapshot)
 					trySend(msgCh, Message{
@@ -652,6 +664,9 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		}
 
 		diagnosticSnapshot := diagnostics.snapshot(c.notificationProtocol, c.turnStarted, c.turnID, len(c.completedTurnIDs))
+		if silentTurnForced.Load() {
+			diagnosticSnapshot["silent_turn_forced"] = true
+		}
 		if codexShouldPersistDiagnostics(diagnosticSnapshot) {
 			if artifactPath := persistCodexDiagnosticsArtifact(opts.Cwd, diagnosticSnapshot, b.cfg.Logger); artifactPath != "" {
 				diagnosticSnapshot["diagnostic_artifact_path"] = artifactPath
