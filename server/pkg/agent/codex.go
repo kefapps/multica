@@ -38,6 +38,8 @@ var (
 )
 
 const codexDiagnosticHistoryLimit = 8
+const codexDiagnosticRawLineLimit = 16
+const codexDiagnosticRawLineMaxBytes = 1024
 
 type codexDiagnostics struct {
 	start time.Time
@@ -63,6 +65,7 @@ type codexDiagnostics struct {
 	recentNotificationMethods []string
 	recentLegacyEventTypes    []string
 	recentUnhandledEvents     []string
+	recentRawLines            []string
 	messageCounts             map[MessageType]int
 
 	lastMalformedLine string
@@ -104,6 +107,18 @@ func (d *codexDiagnostics) noteLine(now time.Time) {
 		d.firstLineMs = elapsed
 	}
 	d.lastLineMs = elapsed
+}
+
+func (d *codexDiagnostics) noteRawLine(line string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(line) > codexDiagnosticRawLineMaxBytes {
+		line = line[:codexDiagnosticRawLineMaxBytes] + "...(truncated)"
+	}
+	d.pushRecent(&d.recentRawLines, line)
+	if len(d.recentRawLines) > codexDiagnosticRawLineLimit {
+		d.recentRawLines = append([]string(nil), d.recentRawLines[len(d.recentRawLines)-codexDiagnosticRawLineLimit:]...)
+	}
 }
 
 func (d *codexDiagnostics) noteMalformedLine(line string) {
@@ -216,6 +231,7 @@ func (d *codexDiagnostics) snapshot(protocol string, turnStarted bool, turnID st
 		"recent_notification_methods":  append([]string(nil), d.recentNotificationMethods...),
 		"recent_legacy_event_types":    append([]string(nil), d.recentLegacyEventTypes...),
 		"recent_unhandled_events":      append([]string(nil), d.recentUnhandledEvents...),
+		"recent_raw_lines":             append([]string(nil), d.recentRawLines...),
 		"message_counts":               messageCounts,
 	}
 	if d.lastMalformedLine != "" {
@@ -416,6 +432,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				continue
 			}
 			diagnostics.noteLine(time.Now())
+			diagnostics.noteRawLine(line)
 			c.handleLine(line)
 		}
 		diagnostics.noteReaderError(scanner.Err())

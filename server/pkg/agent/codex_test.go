@@ -870,6 +870,28 @@ func TestCodexRawInternalItemLifecycleIsIgnored(t *testing.T) {
 	}
 }
 
+func TestCodexDiagnosticsSnapshotIncludesRecentRawLines(t *testing.T) {
+	t.Parallel()
+
+	d := newCodexDiagnostics(time.Unix(0, 0))
+	d.noteLine(time.Unix(0, 0))
+	d.noteRawLine(`{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"thread-1"}}}`)
+	d.noteLine(time.Unix(0, int64(time.Millisecond)))
+	d.noteRawLine(strings.Repeat("x", codexDiagnosticRawLineMaxBytes+32))
+
+	snapshot := d.snapshot("raw", true, "thread-1", 0)
+	rawLines, _ := snapshot["recent_raw_lines"].([]string)
+	if len(rawLines) != 2 {
+		t.Fatalf("expected 2 raw lines, got %#v", rawLines)
+	}
+	if rawLines[0] == "" {
+		t.Fatal("expected first raw line to be preserved")
+	}
+	if !strings.HasSuffix(rawLines[1], "...(truncated)") {
+		t.Fatalf("expected second raw line to be truncated, got %q", rawLines[1])
+	}
+}
+
 func TestCodexShouldPersistDiagnosticsForSilentTurn(t *testing.T) {
 	t.Parallel()
 
