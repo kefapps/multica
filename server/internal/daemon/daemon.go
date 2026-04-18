@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -996,6 +997,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		"duration", elapsed.String(),
 		"tools", tools,
 	)
+	if len(result.Diagnostics) > 0 {
+		taskLog.Info("agent diagnostics", "diagnostics", result.Diagnostics)
+	}
 
 	// Convert agent usage map to task usage entries.
 	var usageEntries []TaskUsageEntry
@@ -1016,7 +1020,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	switch result.Status {
 	case "completed":
 		if result.Output == "" {
-			return TaskResult{}, fmt.Errorf("%s returned empty output", provider)
+			return TaskResult{}, errors.New(appendAgentDiagnostics(fmt.Sprintf("%s returned empty output", provider), result.Diagnostics))
 		}
 		return TaskResult{
 			Status:    "completed",
@@ -1033,6 +1037,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		if errMsg == "" {
 			errMsg = fmt.Sprintf("%s execution %s", provider, result.Status)
 		}
+		errMsg = appendAgentDiagnostics(errMsg, result.Diagnostics)
 		return TaskResult{Status: "blocked", Comment: errMsg, EnvRoot: env.RootDir, Usage: usageEntries}, nil
 	}
 }
@@ -1194,6 +1199,20 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 						Content: msg.Content,
 					})
 					mu.Unlock()
+				case agent.MessageLog:
+					content := msg.Content
+					if msg.Level != "" {
+						content = "[" + msg.Level + "] " + content
+					}
+					taskLog.Info("agent log", "level", msg.Level, "content", truncateLog(content, 400))
+					s := seq.Add(1)
+					mu.Lock()
+					batch = append(batch, TaskMessageData{
+						Seq:     int(s),
+						Type:    "log",
+						Content: content,
+					})
+					mu.Unlock()
 				}
 			case <-drainCtx.Done():
 				goto drainDone
@@ -1286,6 +1305,25 @@ func mergeUsage(a, b map[string]agent.TokenUsage) map[string]agent.TokenUsage {
 		merged[model] = existing
 	}
 	return merged
+}
+
+func appendAgentDiagnostics(base string, diagnostics map[string]any) string {
+	if len(diagnostics) == 0 {
+		return base
+	}
+	protocol := diagnostics["protocol"]
+	lines := diagnostics["raw_line_count"]
+	notifications := diagnostics["notification_count"]
+	unhandled := diagnostics["unhandled_notification_count"]
+	turnStarted := diagnostics["turn_started_seen"]
+	summary := fmt.Sprintf("protocol=%v lines=%v notifications=%v unhandled=%v turn_started=%v", protocol, lines, notifications, unhandled, turnStarted)
+	if methods, ok := diagnostics["recent_notification_methods"].([]string); ok && len(methods) > 0 {
+		summary += " recent_methods=" + strings.Join(methods, ",")
+	}
+	if artifact, ok := diagnostics["diagnostic_artifact_path"].(string); ok && artifact != "" {
+		summary += " artifact=" + artifact
+	}
+	return base + " [" + summary + "]"
 }
 
 // repoDataToInfo converts daemon RepoData to repocache RepoInfo.

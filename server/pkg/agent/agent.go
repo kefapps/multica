@@ -79,6 +79,9 @@ type Result struct {
 	DurationMs int64
 	SessionID  string
 	Usage      map[string]TokenUsage // keyed by model name
+	// Diagnostics captures provider-specific runtime observations useful for
+	// post-mortem analysis when a run fails or completes without usable output.
+	Diagnostics map[string]any
 }
 
 // Config configures a Backend instance.

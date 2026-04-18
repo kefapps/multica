@@ -37,6 +37,269 @@ var (
 	codexSilentTurnPollInterval = 1 * time.Second
 )
 
+const codexDiagnosticHistoryLimit = 8
+
+type codexDiagnostics struct {
+	start time.Time
+
+	mu sync.Mutex
+
+	rawLineCount               int
+	malformedLineCount         int
+	responseCount              int
+	serverRequestCount         int
+	notificationCount          int
+	legacyEventCount           int
+	rawNotificationCount       int
+	unhandledNotificationCount int
+
+	firstLineMs         int64
+	firstNotificationMs int64
+	turnStartedMs       int64
+	firstMappedMsgMs    int64
+	lastLineMs          int64
+	lastMappedMsgMs     int64
+
+	recentNotificationMethods []string
+	recentLegacyEventTypes    []string
+	recentUnhandledEvents     []string
+	messageCounts             map[MessageType]int
+
+	lastMalformedLine string
+	lastReaderError   string
+}
+
+func newCodexDiagnostics(start time.Time) *codexDiagnostics {
+	return &codexDiagnostics{
+		start:               start,
+		firstLineMs:         -1,
+		firstNotificationMs: -1,
+		turnStartedMs:       -1,
+		firstMappedMsgMs:    -1,
+		lastMappedMsgMs:     -1,
+		messageCounts:       make(map[MessageType]int),
+	}
+}
+
+func (d *codexDiagnostics) elapsedMs(now time.Time) int64 {
+	return now.Sub(d.start).Milliseconds()
+}
+
+func (d *codexDiagnostics) pushRecent(dst *[]string, value string) {
+	if value == "" {
+		return
+	}
+	*dst = append(*dst, value)
+	if len(*dst) > codexDiagnosticHistoryLimit {
+		*dst = append([]string(nil), (*dst)[len(*dst)-codexDiagnosticHistoryLimit:]...)
+	}
+}
+
+func (d *codexDiagnostics) noteLine(now time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.rawLineCount++
+	elapsed := d.elapsedMs(now)
+	if d.firstLineMs < 0 {
+		d.firstLineMs = elapsed
+	}
+	d.lastLineMs = elapsed
+}
+
+func (d *codexDiagnostics) noteMalformedLine(line string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.malformedLineCount++
+	if len(line) > 200 {
+		line = line[:200]
+	}
+	d.lastMalformedLine = line
+}
+
+func (d *codexDiagnostics) noteResponse() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.responseCount++
+}
+
+func (d *codexDiagnostics) noteServerRequest() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.serverRequestCount++
+}
+
+func (d *codexDiagnostics) noteNotification(now time.Time, method string, protocol string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.notificationCount++
+	if d.firstNotificationMs < 0 {
+		d.firstNotificationMs = d.elapsedMs(now)
+	}
+	switch protocol {
+	case "legacy":
+		d.legacyEventCount++
+	case "raw":
+		d.rawNotificationCount++
+	}
+	d.pushRecent(&d.recentNotificationMethods, method)
+}
+
+func (d *codexDiagnostics) noteLegacyEvent(msgType string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pushRecent(&d.recentLegacyEventTypes, msgType)
+}
+
+func (d *codexDiagnostics) noteUnhandledEvent(detail string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.unhandledNotificationCount++
+	d.pushRecent(&d.recentUnhandledEvents, detail)
+}
+
+func (d *codexDiagnostics) noteTurnStarted(now time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.turnStartedMs < 0 {
+		d.turnStartedMs = d.elapsedMs(now)
+	}
+}
+
+func (d *codexDiagnostics) noteMessage(now time.Time, msg Message) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.messageCounts[msg.Type]++
+	elapsed := d.elapsedMs(now)
+	if d.firstMappedMsgMs < 0 {
+		d.firstMappedMsgMs = elapsed
+	}
+	d.lastMappedMsgMs = elapsed
+}
+
+func (d *codexDiagnostics) noteReaderError(err error) {
+	if err == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lastReaderError = err.Error()
+}
+
+func (d *codexDiagnostics) snapshot(protocol string, turnStarted bool, turnID string, completedTurnCount int) map[string]any {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	messageCounts := make(map[string]any, len(d.messageCounts))
+	for msgType, count := range d.messageCounts {
+		messageCounts[string(msgType)] = count
+	}
+
+	snapshot := map[string]any{
+		"protocol":                     protocol,
+		"raw_line_count":               d.rawLineCount,
+		"malformed_line_count":         d.malformedLineCount,
+		"response_count":               d.responseCount,
+		"server_request_count":         d.serverRequestCount,
+		"notification_count":           d.notificationCount,
+		"legacy_event_count":           d.legacyEventCount,
+		"raw_notification_count":       d.rawNotificationCount,
+		"unhandled_notification_count": d.unhandledNotificationCount,
+		"turn_started_seen":            turnStarted,
+		"turn_id":                      turnID,
+		"completed_turn_count":         completedTurnCount,
+		"first_line_ms":                d.firstLineMs,
+		"first_notification_ms":        d.firstNotificationMs,
+		"turn_started_ms":              d.turnStartedMs,
+		"first_mapped_message_ms":      d.firstMappedMsgMs,
+		"last_line_ms":                 d.lastLineMs,
+		"last_mapped_message_ms":       d.lastMappedMsgMs,
+		"recent_notification_methods":  append([]string(nil), d.recentNotificationMethods...),
+		"recent_legacy_event_types":    append([]string(nil), d.recentLegacyEventTypes...),
+		"recent_unhandled_events":      append([]string(nil), d.recentUnhandledEvents...),
+		"message_counts":               messageCounts,
+	}
+	if d.lastMalformedLine != "" {
+		snapshot["last_malformed_line"] = d.lastMalformedLine
+	}
+	if d.lastReaderError != "" {
+		snapshot["reader_error"] = d.lastReaderError
+	}
+	return snapshot
+}
+
+func codexDiagnosticsSummary(snapshot map[string]any) string {
+	if len(snapshot) == 0 {
+		return ""
+	}
+	parts := []string{
+		fmt.Sprintf("protocol=%v", snapshot["protocol"]),
+		fmt.Sprintf("lines=%v", snapshot["raw_line_count"]),
+		fmt.Sprintf("notifications=%v", snapshot["notification_count"]),
+		fmt.Sprintf("responses=%v", snapshot["response_count"]),
+		fmt.Sprintf("unhandled=%v", snapshot["unhandled_notification_count"]),
+		fmt.Sprintf("turn_started=%v", snapshot["turn_started_seen"]),
+	}
+	if methods, ok := snapshot["recent_notification_methods"].([]string); ok && len(methods) > 0 {
+		parts = append(parts, fmt.Sprintf("recent_methods=%s", strings.Join(methods, ",")))
+	}
+	if events, ok := snapshot["recent_unhandled_events"].([]string); ok && len(events) > 0 {
+		parts = append(parts, fmt.Sprintf("recent_unhandled=%s", strings.Join(events, ",")))
+	}
+	return strings.Join(parts, " ")
+}
+
+func codexShouldPersistDiagnostics(snapshot map[string]any) bool {
+	if len(snapshot) == 0 {
+		return false
+	}
+	if count, _ := snapshot["unhandled_notification_count"].(int); count > 0 {
+		return true
+	}
+	if count, _ := snapshot["malformed_line_count"].(int); count > 0 {
+		return true
+	}
+	if turnStarted, _ := snapshot["turn_started_seen"].(bool); !turnStarted {
+		return false
+	}
+	if counts, ok := snapshot["message_counts"].(map[string]any); ok {
+		for _, key := range []string{string(MessageText), string(MessageThinking), string(MessageToolUse), string(MessageToolResult)} {
+			if n, ok := counts[key].(int); ok && n > 0 {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func persistCodexDiagnosticsArtifact(cwd string, snapshot map[string]any, logger *slog.Logger) string {
+	if cwd == "" || len(snapshot) == 0 {
+		return ""
+	}
+	debugDir := filepath.Join(cwd, ".multica-debug")
+	if err := os.MkdirAll(debugDir, 0o755); err != nil {
+		if logger != nil {
+			logger.Warn("codex diagnostics artifact mkdir failed", "error", err)
+		}
+		return ""
+	}
+	path := filepath.Join(debugDir, fmt.Sprintf("codex-silent-turn-%d.json", time.Now().UnixNano()))
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		if logger != nil {
+			logger.Warn("codex diagnostics artifact marshal failed", "error", err)
+		}
+		return ""
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		if logger != nil {
+			logger.Warn("codex diagnostics artifact write failed", "error", err)
+		}
+		return ""
+	}
+	return path
+}
+
 // codexBackend implements Backend by spawning `codex app-server --listen stdio://`
 // and communicating via JSON-RPC 2.0 over stdin/stdout.
 type codexBackend struct {
@@ -87,6 +350,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 
 	msgCh := make(chan Message, 256)
 	resCh := make(chan Result, 1)
+	diagnostics := newCodexDiagnostics(time.Now())
 
 	var outputMu sync.Mutex
 	var output strings.Builder
@@ -107,7 +371,9 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		stdin:                stdin,
 		pending:              make(map[int]*pendingRPC),
 		notificationProtocol: "unknown",
+		diagnostics:          diagnostics,
 		onMessage: func(msg Message) {
+			diagnostics.noteMessage(time.Now(), msg)
 			markActivity()
 			if msg.Type == MessageText {
 				outputMu.Lock()
@@ -149,8 +415,10 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			if line == "" {
 				continue
 			}
+			diagnostics.noteLine(time.Now())
 			c.handleLine(line)
 		}
+		diagnostics.noteReaderError(scanner.Err())
 		c.closeAllPending(fmt.Errorf("codex process exited"))
 	}()
 
@@ -264,6 +532,14 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 						"pid", cmd.Process.Pid,
 						"idle_ms", idleFor.Milliseconds(),
 					)
+					snapshot := diagnostics.snapshot(c.notificationProtocol, c.turnStarted, c.turnID, len(c.completedTurnIDs))
+					summary := codexDiagnosticsSummary(snapshot)
+					b.cfg.Logger.Warn("codex silent turn diagnostics", "pid", cmd.Process.Pid, "summary", summary, "diagnostics", snapshot)
+					trySend(msgCh, Message{
+						Type:    MessageLog,
+						Level:   "warn",
+						Content: "codex silent turn diagnostics: " + summary,
+					})
 					select {
 					case turnDone <- false:
 					default:
@@ -327,12 +603,20 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			usageMap = map[string]TokenUsage{model: u}
 		}
 
+		diagnosticSnapshot := diagnostics.snapshot(c.notificationProtocol, c.turnStarted, c.turnID, len(c.completedTurnIDs))
+		if codexShouldPersistDiagnostics(diagnosticSnapshot) {
+			if artifactPath := persistCodexDiagnosticsArtifact(opts.Cwd, diagnosticSnapshot, b.cfg.Logger); artifactPath != "" {
+				diagnosticSnapshot["diagnostic_artifact_path"] = artifactPath
+			}
+		}
+
 		resCh <- Result{
-			Status:     finalStatus,
-			Output:     finalOutput,
-			Error:      finalError,
-			DurationMs: duration.Milliseconds(),
-			Usage:      usageMap,
+			Status:      finalStatus,
+			Output:      finalOutput,
+			Error:       finalError,
+			DurationMs:  duration.Milliseconds(),
+			Usage:       usageMap,
+			Diagnostics: diagnosticSnapshot,
 		}
 	}()
 
@@ -427,6 +711,7 @@ type codexClient struct {
 	notificationProtocol string // "unknown", "legacy", "raw"
 	turnStarted          bool
 	completedTurnIDs     map[string]bool
+	diagnostics          *codexDiagnostics
 
 	usageMu sync.Mutex
 	usage   TokenUsage // accumulated from turn events
@@ -515,6 +800,9 @@ func (c *codexClient) closeAllPending(err error) {
 func (c *codexClient) handleLine(line string) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
+		if c.diagnostics != nil {
+			c.diagnostics.noteMalformedLine(line)
+		}
 		return
 	}
 
@@ -542,6 +830,9 @@ func (c *codexClient) handleLine(line string) {
 }
 
 func (c *codexClient) handleResponse(raw map[string]json.RawMessage) {
+	if c.diagnostics != nil {
+		c.diagnostics.noteResponse()
+	}
 	var id int
 	if err := json.Unmarshal(raw["id"], &id); err != nil {
 		return
@@ -571,6 +862,9 @@ func (c *codexClient) handleResponse(raw map[string]json.RawMessage) {
 }
 
 func (c *codexClient) handleServerRequest(raw map[string]json.RawMessage) {
+	if c.diagnostics != nil {
+		c.diagnostics.noteServerRequest()
+	}
 	var id int
 	_ = json.Unmarshal(raw["id"], &id)
 
@@ -591,6 +885,7 @@ func (c *codexClient) handleServerRequest(raw map[string]json.RawMessage) {
 func (c *codexClient) handleNotification(raw map[string]json.RawMessage) {
 	var method string
 	_ = json.Unmarshal(raw["method"], &method)
+	handled := false
 
 	var params map[string]any
 	if p, ok := raw["params"]; ok {
@@ -600,6 +895,10 @@ func (c *codexClient) handleNotification(raw map[string]json.RawMessage) {
 	// Legacy codex/event notifications
 	if method == "codex/event" || strings.HasPrefix(method, "codex/event/") {
 		c.notificationProtocol = "legacy"
+		if c.diagnostics != nil {
+			c.diagnostics.noteNotification(time.Now(), method, "legacy")
+		}
+		handled = true
 		msgData, ok := params["msg"]
 		if !ok {
 			return
@@ -621,17 +920,32 @@ func (c *codexClient) handleNotification(raw map[string]json.RawMessage) {
 		}
 
 		if c.notificationProtocol == "raw" {
+			if c.diagnostics != nil {
+				c.diagnostics.noteNotification(time.Now(), method, "raw")
+			}
 			c.handleRawNotification(method, params)
+			handled = true
 		}
+	}
+
+	if !handled && c.diagnostics != nil {
+		c.diagnostics.noteNotification(time.Now(), method, c.notificationProtocol)
+		c.diagnostics.noteUnhandledEvent("notification:" + method)
 	}
 }
 
 func (c *codexClient) handleEvent(msg map[string]any) {
 	msgType, _ := msg["type"].(string)
+	if c.diagnostics != nil {
+		c.diagnostics.noteLegacyEvent(msgType)
+	}
 
 	switch msgType {
 	case "task_started":
 		c.turnStarted = true
+		if c.diagnostics != nil {
+			c.diagnostics.noteTurnStarted(time.Now())
+		}
 		if c.onMessage != nil {
 			c.onMessage(Message{Type: MessageStatus, Status: "running"})
 		}
@@ -690,6 +1004,10 @@ func (c *codexClient) handleEvent(msg map[string]any) {
 		if c.onTurnDone != nil {
 			c.onTurnDone(true)
 		}
+	default:
+		if c.diagnostics != nil {
+			c.diagnostics.noteUnhandledEvent("legacy:" + msgType)
+		}
 	}
 }
 
@@ -699,6 +1017,9 @@ func (c *codexClient) handleRawNotification(method string, params map[string]any
 		c.turnStarted = true
 		if turnID := extractNestedString(params, "turn", "id"); turnID != "" {
 			c.turnID = turnID
+		}
+		if c.diagnostics != nil {
+			c.diagnostics.noteTurnStarted(time.Now())
 		}
 		if c.onMessage != nil {
 			c.onMessage(Message{Type: MessageStatus, Status: "running"})
@@ -739,19 +1060,32 @@ func (c *codexClient) handleRawNotification(method string, params map[string]any
 
 	default:
 		if strings.HasPrefix(method, "item/") {
-			c.handleItemNotification(method, params)
+			if handled, detail := c.handleItemNotification(method, params); !handled && c.diagnostics != nil {
+				if detail == "" {
+					detail = method
+				}
+				c.diagnostics.noteUnhandledEvent(detail)
+			}
+			return
+		}
+		if c.diagnostics != nil {
+			c.diagnostics.noteUnhandledEvent(method)
 		}
 	}
 }
 
-func (c *codexClient) handleItemNotification(method string, params map[string]any) {
+func (c *codexClient) handleItemNotification(method string, params map[string]any) (bool, string) {
 	item, ok := params["item"].(map[string]any)
 	if !ok {
-		return
+		return false, method
 	}
 
 	itemType, _ := item["type"].(string)
 	itemID, _ := item["id"].(string)
+	detail := method
+	if itemType != "" {
+		detail = method + ":" + itemType
+	}
 
 	switch {
 	case method == "item/started" && itemType == "commandExecution":
@@ -764,6 +1098,7 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 				Input:  map[string]any{"command": command},
 			})
 		}
+		return true, detail
 
 	case method == "item/completed" && itemType == "commandExecution":
 		output, _ := item["aggregatedOutput"].(string)
@@ -775,6 +1110,7 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 				Output: output,
 			})
 		}
+		return true, detail
 
 	case method == "item/started" && itemType == "fileChange":
 		if c.onMessage != nil {
@@ -784,6 +1120,7 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 				CallID: itemID,
 			})
 		}
+		return true, detail
 
 	case method == "item/completed" && itemType == "fileChange":
 		if c.onMessage != nil {
@@ -793,6 +1130,7 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 				CallID: itemID,
 			})
 		}
+		return true, detail
 
 	case method == "item/completed" && itemType == "agentMessage":
 		text, _ := item["text"].(string)
@@ -805,7 +1143,9 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 				c.onTurnDone(false)
 			}
 		}
+		return true, detail
 	}
+	return false, detail
 }
 
 // extractUsageFromMap extracts token usage from a map that may contain

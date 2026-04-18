@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -632,5 +633,151 @@ for line in sys.stdin:
 	}
 	if !sawMessage {
 		t.Fatal("expected streamed message before idle completion")
+	}
+	if len(result.Diagnostics) == 0 {
+		t.Fatal("expected diagnostics snapshot to be attached")
+	}
+	if artifactPath, _ := result.Diagnostics["diagnostic_artifact_path"].(string); artifactPath != "" {
+		t.Fatalf("did not expect diagnostic artifact for healthy run, got %q", artifactPath)
+	}
+}
+
+func TestCodexDiagnosticsCaptureUnhandledNotification(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.notificationProtocol = "unknown"
+	c.diagnostics = newCodexDiagnostics(time.Unix(0, 0))
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"turn/progress","params":{"pct":10}}`)
+
+	snapshot := c.diagnostics.snapshot(c.notificationProtocol, c.turnStarted, c.turnID, len(c.completedTurnIDs))
+	if got := snapshot["notification_count"]; got != 1 {
+		t.Fatalf("expected notification_count=1, got %v", got)
+	}
+	if got := snapshot["unhandled_notification_count"]; got != 1 {
+		t.Fatalf("expected unhandled_notification_count=1, got %v", got)
+	}
+	events, _ := snapshot["recent_unhandled_events"].([]string)
+	if len(events) != 1 || events[0] != "notification:turn/progress" {
+		t.Fatalf("unexpected unhandled events: %#v", events)
+	}
+}
+
+func TestCodexShouldPersistDiagnosticsForSilentTurn(t *testing.T) {
+	t.Parallel()
+
+	silent := map[string]any{
+		"turn_started_seen":            true,
+		"unhandled_notification_count": 0,
+		"malformed_line_count":         0,
+		"message_counts":               map[string]any{},
+	}
+	if !codexShouldPersistDiagnostics(silent) {
+		t.Fatal("expected silent turn diagnostics to be persisted")
+	}
+
+	withText := map[string]any{
+		"turn_started_seen":            true,
+		"unhandled_notification_count": 0,
+		"malformed_line_count":         0,
+		"message_counts": map[string]any{
+			string(MessageText): 1,
+		},
+	}
+	if codexShouldPersistDiagnostics(withText) {
+		t.Fatal("did not expect diagnostics persistence when usable output exists")
+	}
+}
+
+func TestCodexExecuteSilentRunPersistsDiagnostics(t *testing.T) {
+	oldGrace := codexSilentTurnGracePeriod
+	oldPoll := codexSilentTurnPollInterval
+	oldShutdown := codexShutdownGracePeriod
+	oldForced := codexForcedShutdownWait
+	codexSilentTurnGracePeriod = 150 * time.Millisecond
+	codexSilentTurnPollInterval = 25 * time.Millisecond
+	codexShutdownGracePeriod = 250 * time.Millisecond
+	codexForcedShutdownWait = 100 * time.Millisecond
+	t.Cleanup(func() {
+		codexSilentTurnGracePeriod = oldGrace
+		codexSilentTurnPollInterval = oldPoll
+		codexShutdownGracePeriod = oldShutdown
+		codexForcedShutdownWait = oldForced
+	})
+
+	tmpDir := t.TempDir()
+	execPath := filepath.Join(tmpDir, "codex")
+	script := `#!/usr/bin/env python3
+import json
+import sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+    elif method == "thread/start":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"thread": {"id": "thread-1"}}})
+    elif method == "turn/start":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"ok": True}})
+        send({"jsonrpc": "2.0", "method": "turn/started", "params": {"turn": {"id": "turn-1"}}})
+        send({"jsonrpc": "2.0", "method": "turn/progress", "params": {"pct": 10}})
+`
+	if err := os.WriteFile(execPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex executable: %v", err)
+	}
+
+	backend := &codexBackend{
+		cfg: Config{
+			ExecutablePath: execPath,
+			Logger:         slog.Default(),
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	session, err := backend.Execute(ctx, "diagnose the silent turn", ExecOptions{
+		Cwd:     tmpDir,
+		Timeout: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var sawDiagnosticLog bool
+	for msg := range session.Messages {
+		if msg.Type == MessageLog && strings.Contains(msg.Content, "silent turn diagnostics") {
+			sawDiagnosticLog = true
+		}
+	}
+
+	result := <-session.Result
+	if result.Status != "completed" {
+		t.Fatalf("expected completed status, got %q (error=%q)", result.Status, result.Error)
+	}
+	if result.Output != "" {
+		t.Fatalf("expected empty output, got %q", result.Output)
+	}
+	if !sawDiagnosticLog {
+		t.Fatal("expected watchdog diagnostic log message")
+	}
+	if len(result.Diagnostics) == 0 {
+		t.Fatal("expected diagnostics snapshot to be attached")
+	}
+	artifactPath, _ := result.Diagnostics["diagnostic_artifact_path"].(string)
+	if artifactPath == "" {
+		t.Fatal("expected diagnostic artifact path to be recorded")
+	}
+	if _, err := os.Stat(artifactPath); err != nil {
+		t.Fatalf("expected diagnostic artifact to exist: %v", err)
 	}
 }
