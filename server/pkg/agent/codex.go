@@ -711,6 +711,7 @@ type codexClient struct {
 	notificationProtocol string // "unknown", "legacy", "raw"
 	turnStarted          bool
 	completedTurnIDs     map[string]bool
+	streamedAgentItems   map[string]bool
 	diagnostics          *codexDiagnostics
 
 	usageMu sync.Mutex
@@ -1075,6 +1076,24 @@ func (c *codexClient) handleRawNotification(method string, params map[string]any
 }
 
 func (c *codexClient) handleItemNotification(method string, params map[string]any) (bool, string) {
+	if method == "item/agentMessage/delta" {
+		itemID, _ := params["itemId"].(string)
+		delta, _ := params["delta"].(string)
+		if delta == "" {
+			return true, method + ":agentMessage"
+		}
+		if itemID != "" {
+			if c.streamedAgentItems == nil {
+				c.streamedAgentItems = make(map[string]bool)
+			}
+			c.streamedAgentItems[itemID] = true
+		}
+		if c.onMessage != nil {
+			c.onMessage(Message{Type: MessageText, Content: delta})
+		}
+		return true, method + ":agentMessage"
+	}
+
 	item, ok := params["item"].(map[string]any)
 	if !ok {
 		return false, method
@@ -1134,7 +1153,12 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 
 	case method == "item/completed" && itemType == "agentMessage":
 		text, _ := item["text"].(string)
-		if text != "" && c.onMessage != nil {
+		streamed := false
+		if itemID != "" && c.streamedAgentItems != nil {
+			streamed = c.streamedAgentItems[itemID]
+			delete(c.streamedAgentItems, itemID)
+		}
+		if text != "" && !streamed && c.onMessage != nil {
 			c.onMessage(Message{Type: MessageText, Content: text})
 		}
 		phase, _ := item["phase"].(string)

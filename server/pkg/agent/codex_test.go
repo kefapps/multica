@@ -407,6 +407,66 @@ func TestCodexRawItemAgentMessageFinalAnswer(t *testing.T) {
 	}
 }
 
+func TestCodexRawItemAgentMessageDeltaSuppressesCompletedDuplicate(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.notificationProtocol = "raw"
+	c.turnStarted = true
+
+	var texts []string
+	var turnDone bool
+	c.onMessage = func(msg Message) {
+		if msg.Type == MessageText {
+			texts = append(texts, msg.Content)
+		}
+	}
+	c.onTurnDone = func(aborted bool) {
+		if aborted {
+			t.Fatal("expected aborted=false")
+		}
+		turnDone = true
+	}
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"agentMessage","id":"msg-1","text":"","phase":"final_answer"}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"msg-1","delta":"Hel"}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"msg-1","delta":"lo"}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-1","text":"Hello","phase":"final_answer"}}}`)
+
+	if got := strings.Join(texts, ""); got != "Hello" {
+		t.Fatalf("expected streamed text to reconstruct Hello, got %q", got)
+	}
+	if len(texts) != 2 {
+		t.Fatalf("expected exactly 2 delta messages, got %d (%#v)", len(texts), texts)
+	}
+	if !turnDone {
+		t.Fatal("expected onTurnDone for final_answer completion")
+	}
+}
+
+func TestCodexRawItemAgentMessageCompletedWithoutDeltaEmitsText(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.notificationProtocol = "raw"
+
+	var texts []string
+	c.onMessage = func(msg Message) {
+		if msg.Type == MessageText {
+			texts = append(texts, msg.Content)
+		}
+	}
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-1","text":"Hello","phase":"commentary"}}}`)
+
+	if got := strings.Join(texts, ""); got != "Hello" {
+		t.Fatalf("expected completed message text, got %q", got)
+	}
+	if len(texts) != 1 {
+		t.Fatalf("expected a single text message, got %d", len(texts))
+	}
+}
+
 func TestCodexRawThreadStatusIdle(t *testing.T) {
 	t.Parallel()
 
