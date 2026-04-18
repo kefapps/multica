@@ -802,6 +802,84 @@ for line in sys.stdin:
 	}
 }
 
+func TestCodexExecuteUnhandledNotificationPersistsAndSurfacesDiagnostics(t *testing.T) {
+	tmpDir := t.TempDir()
+	execPath := filepath.Join(tmpDir, "codex")
+	script := `#!/usr/bin/env python3
+import json
+import sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+    elif method == "thread/start":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"thread": {"id": "thread-1"}}})
+    elif method == "turn/start":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"ok": True}})
+        send({"jsonrpc": "2.0", "method": "turn/started", "params": {"turn": {"id": "turn-1"}}})
+        send({"jsonrpc": "2.0", "method": "turn/progress", "params": {"pct": 10}})
+        send({"jsonrpc": "2.0", "method": "item/completed", "params": {"item": {"type": "agentMessage", "id": "msg-1", "text": "hello from suspicious codex", "phase": "final_answer"}}})
+`
+	if err := os.WriteFile(execPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex executable: %v", err)
+	}
+
+	backend := &codexBackend{
+		cfg: Config{
+			ExecutablePath: execPath,
+			Logger:         slog.Default(),
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	session, err := backend.Execute(ctx, "diagnose the issue", ExecOptions{
+		Cwd:     tmpDir,
+		Timeout: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var diagnosticLog string
+	for msg := range session.Messages {
+		if msg.Type == MessageLog && strings.Contains(msg.Content, "codex run diagnostics:") {
+			diagnosticLog = msg.Content
+		}
+	}
+
+	result := <-session.Result
+	if result.Status != "completed" {
+		t.Fatalf("expected completed status, got %q (error=%q)", result.Status, result.Error)
+	}
+	if got := result.Diagnostics["unhandled_notification_count"]; got != 1 {
+		t.Fatalf("expected unhandled_notification_count=1, got %v", got)
+	}
+	artifactPath, _ := result.Diagnostics["diagnostic_artifact_path"].(string)
+	if artifactPath == "" {
+		t.Fatal("expected diagnostic artifact path for suspicious run")
+	}
+	if _, err := os.Stat(artifactPath); err != nil {
+		t.Fatalf("expected diagnostic artifact to exist: %v", err)
+	}
+	if diagnosticLog == "" {
+		t.Fatal("expected diagnostic log message to be emitted")
+	}
+	if !strings.Contains(diagnosticLog, "artifact="+artifactPath) {
+		t.Fatalf("expected diagnostic log to include artifact path, got %q", diagnosticLog)
+	}
+}
+
 func TestCodexDiagnosticsCaptureUnhandledNotification(t *testing.T) {
 	t.Parallel()
 
@@ -959,6 +1037,24 @@ func TestCodexDiagnosticsSnapshotIncludesUnhandledRawLine(t *testing.T) {
 	}
 }
 
+func TestCodexDiagnosticsSnapshotIncludesNotificationMethodCounts(t *testing.T) {
+	t.Parallel()
+
+	d := newCodexDiagnostics(time.Unix(0, 0))
+	d.noteNotification(time.Unix(0, 0), "thread/started", "raw")
+	d.noteNotification(time.Unix(0, 0), "thread/started", "raw")
+	d.noteNotification(time.Unix(0, 0), "item/completed", "raw")
+
+	snapshot := d.snapshot("raw", true, "turn-1", 0)
+	counts, _ := snapshot["notification_method_counts"].(map[string]any)
+	if got := counts["thread/started"]; got != 2 {
+		t.Fatalf("expected thread/started count=2, got %v", got)
+	}
+	if got := counts["item/completed"]; got != 1 {
+		t.Fatalf("expected item/completed count=1, got %v", got)
+	}
+}
+
 func TestCodexShouldPersistDiagnosticsForSilentTurn(t *testing.T) {
 	t.Parallel()
 
@@ -982,6 +1078,21 @@ func TestCodexShouldPersistDiagnosticsForSilentTurn(t *testing.T) {
 	}
 	if codexShouldPersistDiagnostics(withText) {
 		t.Fatal("did not expect diagnostics persistence when usable output exists")
+	}
+}
+
+func TestCodexShouldSurfaceDiagnosticsForUnhandledNotification(t *testing.T) {
+	t.Parallel()
+
+	snapshot := map[string]any{
+		"unhandled_notification_count": 1,
+		"malformed_line_count":         0,
+		"message_counts": map[string]any{
+			string(MessageText): 1,
+		},
+	}
+	if !codexShouldSurfaceDiagnostics(snapshot) {
+		t.Fatal("expected suspicious diagnostics to be surfaced")
 	}
 }
 

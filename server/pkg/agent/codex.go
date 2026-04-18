@@ -67,6 +67,7 @@ type codexDiagnostics struct {
 	recentUnhandledEvents     []string
 	recentUnhandledRawLines   []string
 	recentRawLines            []string
+	notificationMethodCounts  map[string]int
 	messageCounts             map[MessageType]int
 
 	lastRawLine       string
@@ -76,13 +77,14 @@ type codexDiagnostics struct {
 
 func newCodexDiagnostics(start time.Time) *codexDiagnostics {
 	return &codexDiagnostics{
-		start:               start,
-		firstLineMs:         -1,
-		firstNotificationMs: -1,
-		turnStartedMs:       -1,
-		firstMappedMsgMs:    -1,
-		lastMappedMsgMs:     -1,
-		messageCounts:       make(map[MessageType]int),
+		start:                    start,
+		firstLineMs:              -1,
+		firstNotificationMs:      -1,
+		turnStartedMs:            -1,
+		firstMappedMsgMs:         -1,
+		lastMappedMsgMs:          -1,
+		notificationMethodCounts: make(map[string]int),
+		messageCounts:            make(map[MessageType]int),
 	}
 }
 
@@ -159,6 +161,7 @@ func (d *codexDiagnostics) noteNotification(now time.Time, method string, protoc
 	case "raw":
 		d.rawNotificationCount++
 	}
+	d.notificationMethodCounts[method]++
 	d.pushRecent(&d.recentNotificationMethods, method)
 }
 
@@ -214,6 +217,10 @@ func (d *codexDiagnostics) snapshot(protocol string, turnStarted bool, turnID st
 	for msgType, count := range d.messageCounts {
 		messageCounts[string(msgType)] = count
 	}
+	notificationMethodCounts := make(map[string]any, len(d.notificationMethodCounts))
+	for method, count := range d.notificationMethodCounts {
+		notificationMethodCounts[method] = count
+	}
 
 	snapshot := map[string]any{
 		"protocol":                     protocol,
@@ -239,6 +246,7 @@ func (d *codexDiagnostics) snapshot(protocol string, turnStarted bool, turnID st
 		"recent_unhandled_events":      append([]string(nil), d.recentUnhandledEvents...),
 		"recent_unhandled_raw_lines":   append([]string(nil), d.recentUnhandledRawLines...),
 		"recent_raw_lines":             append([]string(nil), d.recentRawLines...),
+		"notification_method_counts":   notificationMethodCounts,
 		"message_counts":               messageCounts,
 	}
 	if d.lastMalformedLine != "" {
@@ -290,6 +298,22 @@ func codexShouldPersistDiagnostics(snapshot map[string]any) bool {
 				return false
 			}
 		}
+		return true
+	}
+	return false
+}
+
+func codexShouldSurfaceDiagnostics(snapshot map[string]any) bool {
+	if len(snapshot) == 0 {
+		return false
+	}
+	if count, _ := snapshot["unhandled_notification_count"].(int); count > 0 {
+		return true
+	}
+	if count, _ := snapshot["malformed_line_count"].(int); count > 0 {
+		return true
+	}
+	if artifactPath, _ := snapshot["diagnostic_artifact_path"].(string); artifactPath != "" {
 		return true
 	}
 	return false
@@ -632,6 +656,20 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			if artifactPath := persistCodexDiagnosticsArtifact(opts.Cwd, diagnosticSnapshot, b.cfg.Logger); artifactPath != "" {
 				diagnosticSnapshot["diagnostic_artifact_path"] = artifactPath
 			}
+		}
+		if codexShouldSurfaceDiagnostics(diagnosticSnapshot) {
+			summary := codexDiagnosticsSummary(diagnosticSnapshot)
+			level := "warn"
+			b.cfg.Logger.Warn("codex run diagnostics", "pid", cmd.Process.Pid, "summary", summary, "diagnostics", diagnosticSnapshot)
+			content := "codex run diagnostics: " + summary
+			if artifactPath, _ := diagnosticSnapshot["diagnostic_artifact_path"].(string); artifactPath != "" {
+				content += " artifact=" + artifactPath
+			}
+			trySend(msgCh, Message{
+				Type:    MessageLog,
+				Level:   level,
+				Content: content,
+			})
 		}
 
 		resCh <- Result{
