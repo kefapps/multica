@@ -223,8 +223,11 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		// Migrate agents from old offline runtimes on the same machine to the
 		// newly registered runtime. Uses the runtime's owner_id (preserved via
 		// COALESCE on upsert) so migration works with both PAT and daemon tokens.
-		// Scoped by daemon_id prefix so that only old profile-suffixed runtimes
-		// (e.g. "hostname-staging") from this machine are affected.
+		// Matching allows:
+		//   - the current stable daemon_id
+		//   - older profile-suffixed daemon IDs from the same machine
+		//   - legacy per-process daemon IDs, using the stable runtime name as the
+		//     device identity fallback
 		effectiveOwnerID := registered.OwnerID
 		if effectiveOwnerID.Valid {
 			migrated, err := h.Queries.MigrateAgentsToRuntime(r.Context(), db.MigrateAgentsToRuntimeParams{
@@ -233,6 +236,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				Provider:       provider,
 				OwnerID:        effectiveOwnerID,
 				DaemonIDPrefix: strToText(req.DaemonID),
+				RuntimeName:    registered.Name,
 			})
 			if err != nil {
 				slog.Warn("failed to migrate agents to new runtime", "runtime_id", uuidToString(registered.ID), "error", err)

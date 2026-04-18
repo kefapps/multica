@@ -82,10 +82,13 @@ DELETE FROM agent WHERE runtime_id = $1 AND archived_at IS NOT NULL;
 -- name: MigrateAgentsToRuntime :execrows
 -- Migrates agents from stale offline runtimes to the newly registered runtime.
 -- Only migrates from runtimes that match the same workspace, provider, owner,
--- AND whose daemon_id starts with the current daemon_id followed by '-'.
--- This scopes migration to old profile-suffixed runtimes from the same machine
--- (e.g. "MacBook-staging" matches daemon_id_prefix "MacBook") without touching
--- runtimes from other machines belonging to the same user.
+-- AND either:
+--   * daemon_id is an exact match for the current daemon_id
+--   * daemon_id starts with the current daemon_id followed by '-'
+--   * runtime name matches the newly registered runtime name
+-- The name match covers legacy daemon rows created before stable daemon IDs,
+-- where the daemon_id was an opaque per-process UUID but the runtime display
+-- name already encoded the device identity (e.g. "Codex (MacBook)").
 UPDATE agent
 SET runtime_id = @new_runtime_id
 WHERE runtime_id IN (
@@ -95,7 +98,11 @@ WHERE runtime_id IN (
       AND ar.owner_id = @owner_id
       AND ar.id != @new_runtime_id
       AND ar.status = 'offline'
-      AND ar.daemon_id LIKE @daemon_id_prefix || '-%'
+      AND (
+        ar.daemon_id = @daemon_id_prefix
+        OR ar.daemon_id LIKE @daemon_id_prefix || '-%'
+        OR ar.name = @runtime_name
+      )
 );
 
 -- name: DeleteStaleOfflineRuntimes :many

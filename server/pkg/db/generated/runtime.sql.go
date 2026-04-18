@@ -299,7 +299,11 @@ WHERE runtime_id IN (
       AND ar.owner_id = $4
       AND ar.id != $1
       AND ar.status = 'offline'
-      AND ar.daemon_id LIKE $5 || '-%'
+      AND (
+        ar.daemon_id = $5
+        OR ar.daemon_id LIKE $5 || '-%'
+        OR ar.name = $6
+      )
 )
 `
 
@@ -309,14 +313,19 @@ type MigrateAgentsToRuntimeParams struct {
 	Provider       string      `json:"provider"`
 	OwnerID        pgtype.UUID `json:"owner_id"`
 	DaemonIDPrefix pgtype.Text `json:"daemon_id_prefix"`
+	RuntimeName    string      `json:"runtime_name"`
 }
 
 // Migrates agents from stale offline runtimes to the newly registered runtime.
 // Only migrates from runtimes that match the same workspace, provider, owner,
-// AND whose daemon_id starts with the current daemon_id followed by '-'.
-// This scopes migration to old profile-suffixed runtimes from the same machine
-// (e.g. "MacBook-staging" matches daemon_id_prefix "MacBook") without touching
-// runtimes from other machines belonging to the same user.
+// AND either:
+//   - daemon_id is an exact match for the current daemon_id
+//   - daemon_id starts with the current daemon_id followed by '-'
+//   - runtime name matches the newly registered runtime name
+//
+// The name match covers legacy daemon rows created before stable daemon IDs,
+// where the daemon_id was an opaque per-process UUID but the runtime display
+// name already encoded the device identity (e.g. "Codex (MacBook)").
 func (q *Queries) MigrateAgentsToRuntime(ctx context.Context, arg MigrateAgentsToRuntimeParams) (int64, error) {
 	result, err := q.db.Exec(ctx, migrateAgentsToRuntime,
 		arg.NewRuntimeID,
@@ -324,6 +333,7 @@ func (q *Queries) MigrateAgentsToRuntime(ctx context.Context, arg MigrateAgentsT
 		arg.Provider,
 		arg.OwnerID,
 		arg.DaemonIDPrefix,
+		arg.RuntimeName,
 	)
 	if err != nil {
 		return 0, err
