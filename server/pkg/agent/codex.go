@@ -312,6 +312,10 @@ func (d *codexDiagnostics) snapshot(protocol string, turnStarted bool, turnID st
 		"message_counts":               messageCounts,
 		"stderr_category_counts":       stderrCategoryCounts,
 	}
+	snapshot["started_command_execution_count"] = snapshotCount(itemLifecycleCounts, "item/started:commandExecution")
+	snapshot["started_reasoning_count"] = snapshotCount(itemLifecycleCounts, "item/started:reasoning")
+	snapshot["completed_agent_message_count"] = snapshotCount(itemLifecycleCounts, "item/completed:agentMessage")
+	snapshot["suspected_ack_only_turn"] = codexLooksAckOnlyTurn(snapshot)
 	if d.lastMalformedLine != "" {
 		snapshot["last_malformed_line"] = d.lastMalformedLine
 	}
@@ -336,6 +340,9 @@ func codexDiagnosticsSummary(snapshot map[string]any) string {
 	if forced, _ := snapshot["silent_turn_forced"].(bool); forced {
 		parts = append(parts, "silent_turn_forced=true")
 	}
+	if ackOnly, _ := snapshot["suspected_ack_only_turn"].(bool); ackOnly {
+		parts = append(parts, "ack_only_turn=true")
+	}
 	if counts, ok := snapshot["stderr_category_counts"].(map[string]any); ok {
 		if n, ok := counts["responses_websocket_error"].(int); ok && n > 0 {
 			parts = append(parts, fmt.Sprintf("stderr_ws_errors=%d", n))
@@ -351,6 +358,42 @@ func codexDiagnosticsSummary(snapshot map[string]any) string {
 		parts = append(parts, fmt.Sprintf("recent_unhandled=%s", strings.Join(events, ",")))
 	}
 	return strings.Join(parts, " ")
+}
+
+func snapshotCount(counts map[string]any, key string) int {
+	if counts == nil {
+		return 0
+	}
+	if n, ok := counts[key].(int); ok {
+		return n
+	}
+	return 0
+}
+
+func codexLooksAckOnlyTurn(snapshot map[string]any) bool {
+	if len(snapshot) == 0 {
+		return false
+	}
+	forced, _ := snapshot["silent_turn_forced"].(bool)
+	if !forced {
+		return false
+	}
+	messageCounts, _ := snapshot["message_counts"].(map[string]any)
+	textCount := snapshotCount(messageCounts, string(MessageText))
+	if textCount == 0 {
+		return false
+	}
+	if snapshotCount(messageCounts, string(MessageToolUse)) > 0 || snapshotCount(messageCounts, string(MessageToolResult)) > 0 || snapshotCount(messageCounts, string(MessageThinking)) > 0 {
+		return false
+	}
+	itemLifecycleCounts, _ := snapshot["item_lifecycle_counts"].(map[string]any)
+	if snapshotCount(itemLifecycleCounts, "item/started:commandExecution") > 0 || snapshotCount(itemLifecycleCounts, "item/started:reasoning") > 0 {
+		return false
+	}
+	if snapshotCount(itemLifecycleCounts, "item/completed:agentMessage") > 0 {
+		return false
+	}
+	return true
 }
 
 func codexShouldPersistDiagnostics(snapshot map[string]any) bool {

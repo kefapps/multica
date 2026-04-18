@@ -1202,6 +1202,53 @@ func TestCodexShouldPersistDiagnosticsForForcedSilentTurnWithPriorText(t *testin
 	}
 }
 
+func TestCodexDiagnosticsSnapshotClassifiesAckOnlyTurn(t *testing.T) {
+	t.Parallel()
+
+	snapshot := map[string]any{
+		"silent_turn_forced": true,
+		"message_counts": map[string]any{
+			string(MessageStatus): 1,
+			string(MessageText):   28,
+		},
+		"item_lifecycle_counts": map[string]any{
+			"item/started:agentMessage": 1,
+		},
+	}
+
+	if !codexLooksAckOnlyTurn(snapshot) {
+		t.Fatalf("expected ack-only classification, got %#v", snapshot)
+	}
+	snapshot["suspected_ack_only_turn"] = codexLooksAckOnlyTurn(snapshot)
+	if summary := codexDiagnosticsSummary(snapshot); !strings.Contains(summary, "ack_only_turn=true") {
+		t.Fatalf("expected summary to mention ack_only_turn=true, got %q", summary)
+	}
+}
+
+func TestCodexDiagnosticsSnapshotDoesNotClassifyHealthyTurnAsAckOnly(t *testing.T) {
+	t.Parallel()
+
+	snapshot := map[string]any{
+		"silent_turn_forced": true,
+		"message_counts": map[string]any{
+			string(MessageStatus):     1,
+			string(MessageText):       208,
+			string(MessageToolUse):    9,
+			string(MessageToolResult): 20,
+		},
+		"item_lifecycle_counts": map[string]any{
+			"item/started:commandExecution":   9,
+			"item/completed:agentMessage":     1,
+			"item/started:reasoning":          2,
+			"item/completed:commandExecution": 9,
+		},
+	}
+
+	if codexLooksAckOnlyTurn(snapshot) {
+		t.Fatalf("did not expect healthy/tool-active run to be classified as ack-only: %#v", snapshot)
+	}
+}
+
 func TestCodexExecuteSilentRunPersistsDiagnostics(t *testing.T) {
 	oldGrace := codexSilentTurnGracePeriod
 	oldPoll := codexSilentTurnPollInterval
