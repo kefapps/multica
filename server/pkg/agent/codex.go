@@ -68,6 +68,8 @@ type codexDiagnostics struct {
 	recentUnhandledRawLines   []string
 	recentRawLines            []string
 	notificationMethodCounts  map[string]int
+	itemLifecycleCounts       map[string]int
+	recentItemLifecycleEvents []string
 	messageCounts             map[MessageType]int
 
 	lastRawLine       string
@@ -84,6 +86,7 @@ func newCodexDiagnostics(start time.Time) *codexDiagnostics {
 		firstMappedMsgMs:         -1,
 		lastMappedMsgMs:          -1,
 		notificationMethodCounts: make(map[string]int),
+		itemLifecycleCounts:      make(map[string]int),
 		messageCounts:            make(map[MessageType]int),
 	}
 }
@@ -181,6 +184,24 @@ func (d *codexDiagnostics) noteUnhandledEvent(detail string) {
 	}
 }
 
+func (d *codexDiagnostics) noteItemLifecycle(method string, itemType string, itemID string, phase string) {
+	if method == "" || itemType == "" {
+		return
+	}
+	key := method + ":" + itemType
+	detail := key
+	if itemID != "" {
+		detail += ":" + itemID
+	}
+	if phase != "" {
+		detail += ":phase=" + phase
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.itemLifecycleCounts[key]++
+	d.pushRecent(&d.recentItemLifecycleEvents, detail)
+}
+
 func (d *codexDiagnostics) noteTurnStarted(now time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -221,6 +242,10 @@ func (d *codexDiagnostics) snapshot(protocol string, turnStarted bool, turnID st
 	for method, count := range d.notificationMethodCounts {
 		notificationMethodCounts[method] = count
 	}
+	itemLifecycleCounts := make(map[string]any, len(d.itemLifecycleCounts))
+	for key, count := range d.itemLifecycleCounts {
+		itemLifecycleCounts[key] = count
+	}
 
 	snapshot := map[string]any{
 		"protocol":                     protocol,
@@ -247,6 +272,8 @@ func (d *codexDiagnostics) snapshot(protocol string, turnStarted bool, turnID st
 		"recent_unhandled_raw_lines":   append([]string(nil), d.recentUnhandledRawLines...),
 		"recent_raw_lines":             append([]string(nil), d.recentRawLines...),
 		"notification_method_counts":   notificationMethodCounts,
+		"item_lifecycle_counts":        itemLifecycleCounts,
+		"recent_item_lifecycle_events": append([]string(nil), d.recentItemLifecycleEvents...),
 		"message_counts":               messageCounts,
 	}
 	if d.lastMalformedLine != "" {
@@ -1236,9 +1263,13 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 
 	itemType, _ := item["type"].(string)
 	itemID, _ := item["id"].(string)
+	phase, _ := item["phase"].(string)
 	detail := method
 	if itemType != "" {
 		detail = method + ":" + itemType
+	}
+	if c.diagnostics != nil {
+		c.diagnostics.noteItemLifecycle(method, itemType, itemID, phase)
 	}
 
 	switch {
@@ -1320,7 +1351,6 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 		if text != "" && !streamed && c.onMessage != nil {
 			c.onMessage(Message{Type: MessageText, Content: text})
 		}
-		phase, _ := item["phase"].(string)
 		if phase == "final_answer" && c.turnStarted {
 			if c.onTurnDone != nil {
 				c.onTurnDone(false)

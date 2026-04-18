@@ -1062,6 +1062,33 @@ func TestCodexDiagnosticsSnapshotIncludesNotificationMethodCounts(t *testing.T) 
 	}
 }
 
+func TestCodexDiagnosticsSnapshotIncludesItemLifecycleEvents(t *testing.T) {
+	t.Parallel()
+
+	d := newCodexDiagnostics(time.Unix(0, 0))
+	d.noteItemLifecycle("item/started", "agentMessage", "msg-1", "commentary")
+	d.noteItemLifecycle("item/completed", "agentMessage", "msg-1", "final_answer")
+
+	snapshot := d.snapshot("raw", true, "turn-1", 0)
+	counts, _ := snapshot["item_lifecycle_counts"].(map[string]any)
+	if got := counts["item/started:agentMessage"]; got != 1 {
+		t.Fatalf("expected item/started:agentMessage count=1, got %v", got)
+	}
+	if got := counts["item/completed:agentMessage"]; got != 1 {
+		t.Fatalf("expected item/completed:agentMessage count=1, got %v", got)
+	}
+	recent, _ := snapshot["recent_item_lifecycle_events"].([]string)
+	if len(recent) != 2 {
+		t.Fatalf("expected 2 recent item lifecycle events, got %#v", recent)
+	}
+	if recent[0] != "item/started:agentMessage:msg-1:phase=commentary" {
+		t.Fatalf("unexpected first lifecycle event: %q", recent[0])
+	}
+	if recent[1] != "item/completed:agentMessage:msg-1:phase=final_answer" {
+		t.Fatalf("unexpected second lifecycle event: %q", recent[1])
+	}
+}
+
 func TestCodexShouldPersistDiagnosticsForSilentTurn(t *testing.T) {
 	t.Parallel()
 
