@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,6 +21,21 @@ import (
 var codexBlockedArgs = map[string]blockedArgMode{
 	"--listen": blockedWithValue, // stdio:// transport for daemon communication
 }
+
+var (
+	// codexShutdownGracePeriod bounds how long we wait for the Codex app-server
+	// to exit cleanly after the turn is finished.
+	codexShutdownGracePeriod = 5 * time.Second
+	// codexForcedShutdownWait bounds the final wait after we forcibly kill a
+	// stuck Codex process during session shutdown.
+	codexForcedShutdownWait = 2 * time.Second
+	// codexSilentTurnGracePeriod is the fallback idle window after which we
+	// conclude that Codex failed to emit an explicit turn completion event.
+	codexSilentTurnGracePeriod = 90 * time.Second
+	// codexSilentTurnPollInterval controls how often the idle watchdog checks
+	// for a stalled turn.
+	codexSilentTurnPollInterval = 1 * time.Second
+)
 
 // codexBackend implements Backend by spawning `codex app-server --listen stdio://`
 // and communicating via JSON-RPC 2.0 over stdin/stdout.
@@ -72,6 +90,13 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 
 	var outputMu sync.Mutex
 	var output strings.Builder
+	var inFlightTools atomic.Int32
+	var sawActivity atomic.Bool
+	var lastActivity atomic.Int64
+	markActivity := func() {
+		sawActivity.Store(true)
+		lastActivity.Store(time.Now().UnixNano())
+	}
 
 	// turnDone is set before starting the reader goroutine so there is no
 	// race between the lifecycle goroutine writing and the reader reading.
@@ -83,10 +108,25 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		pending:              make(map[int]*pendingRPC),
 		notificationProtocol: "unknown",
 		onMessage: func(msg Message) {
+			markActivity()
 			if msg.Type == MessageText {
 				outputMu.Lock()
 				output.WriteString(msg.Content)
 				outputMu.Unlock()
+			}
+			switch msg.Type {
+			case MessageToolUse:
+				inFlightTools.Add(1)
+			case MessageToolResult:
+				for {
+					current := inFlightTools.Load()
+					if current == 0 {
+						break
+					}
+					if inFlightTools.CompareAndSwap(current, current-1) {
+						break
+					}
+				}
 			}
 			trySend(msgCh, msg)
 		},
@@ -114,6 +154,11 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		c.closeAllPending(fmt.Errorf("codex process exited"))
 	}()
 
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+
 	// Drive the session lifecycle in a goroutine.
 	// Shutdown sequence: lifecycle goroutine closes stdin + cancels context →
 	// codex process exits → reader goroutine's scanner.Scan() returns false →
@@ -122,10 +167,6 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		defer cancel()
 		defer close(msgCh)
 		defer close(resCh)
-		defer func() {
-			stdin.Close()
-			_ = cmd.Wait()
-		}()
 
 		startTime := time.Now()
 		finalStatus := "completed"
@@ -152,19 +193,19 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 
 		// 2. Start thread
 		threadResult, err := c.request(runCtx, "thread/start", map[string]any{
-			"model":                    nilIfEmpty(opts.Model),
-			"modelProvider":            nil,
-			"profile":                  nil,
-			"cwd":                      opts.Cwd,
-			"approvalPolicy":           nil,
-			"sandbox":                  nil,
-			"config":                   nil,
-			"baseInstructions":         nil,
-			"developerInstructions":    nilIfEmpty(opts.SystemPrompt),
-			"compactPrompt":            nil,
-			"includeApplyPatchTool":    nil,
-			"experimentalRawEvents":    false,
-			"persistExtendedHistory":   true,
+			"model":                  nilIfEmpty(opts.Model),
+			"modelProvider":          nil,
+			"profile":                nil,
+			"cwd":                    opts.Cwd,
+			"approvalPolicy":         nil,
+			"sandbox":                nil,
+			"config":                 nil,
+			"baseInstructions":       nil,
+			"developerInstructions":  nilIfEmpty(opts.SystemPrompt),
+			"compactPrompt":          nil,
+			"includeApplyPatchTool":  nil,
+			"experimentalRawEvents":  false,
+			"persistExtendedHistory": true,
 		})
 		if err != nil {
 			finalStatus = "failed"
@@ -184,6 +225,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		b.cfg.Logger.Info("codex thread started", "thread_id", threadID)
 
 		// 3. Send turn and wait for completion
+		markActivity()
 		_, err = c.request(runCtx, "turn/start", map[string]any{
 			"threadId": threadID,
 			"input": []map[string]any{
@@ -196,6 +238,40 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
 			return
 		}
+
+		watchdogDone := make(chan struct{})
+		defer close(watchdogDone)
+		go func() {
+			ticker := time.NewTicker(codexSilentTurnPollInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-watchdogDone:
+					return
+				case <-runCtx.Done():
+					return
+				case <-ticker.C:
+					if !c.turnStarted || !sawActivity.Load() || inFlightTools.Load() != 0 {
+						continue
+					}
+					last := time.Unix(0, lastActivity.Load())
+					idleFor := time.Since(last)
+					if idleFor < codexSilentTurnGracePeriod {
+						continue
+					}
+					b.cfg.Logger.Warn(
+						"codex turn produced no completion event; forcing completion after inactivity",
+						"pid", cmd.Process.Pid,
+						"idle_ms", idleFor.Milliseconds(),
+					)
+					select {
+					case turnDone <- false:
+					default:
+					}
+					return
+				}
+			}
+		}()
 
 		// Wait for turn completion or context cancellation
 		select {
@@ -217,14 +293,9 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		duration := time.Since(startTime)
 		b.cfg.Logger.Info("codex finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
 
-		// Close stdin and cancel context to signal the app-server to exit.
-		// Without this, the long-running codex process keeps stdout open and
-		// the reader goroutine blocks forever on scanner.Scan().
-		stdin.Close()
-		cancel()
-
-		// Wait for the reader goroutine to finish so all output is accumulated.
-		<-readerDone
+		if err := shutdownCodexSession(cmd, stdin, cancel, readerDone, waitDone, b.cfg.Logger); err != nil {
+			b.cfg.Logger.Warn("codex shutdown required forced termination", "error", err)
+		}
 
 		outputMu.Lock()
 		finalOutput := output.String()
@@ -268,17 +339,89 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 	return &Session{Messages: msgCh, Result: resCh}, nil
 }
 
+func shutdownCodexSession(
+	cmd *exec.Cmd,
+	stdin interface{ Close() error },
+	cancel context.CancelFunc,
+	readerDone <-chan struct{},
+	waitDone <-chan error,
+	logger *slog.Logger,
+) error {
+	stdin.Close()
+	cancel()
+
+	readerTimer := time.NewTimer(codexShutdownGracePeriod)
+	defer readerTimer.Stop()
+
+	readerExited := false
+	select {
+	case <-readerDone:
+		readerExited = true
+	case <-readerTimer.C:
+		if cmd.Process != nil {
+			logger.Warn("codex stdout reader did not exit after turn completion; killing process", "pid", cmd.Process.Pid)
+			_ = cmd.Process.Kill()
+		}
+	}
+
+	if !readerExited {
+		forcedTimer := time.NewTimer(codexForcedShutdownWait)
+		defer forcedTimer.Stop()
+		select {
+		case <-readerDone:
+			readerExited = true
+		case <-forcedTimer.C:
+			logger.Warn("codex stdout reader still active after forced kill grace period")
+		}
+	}
+
+	waitTimer := time.NewTimer(codexShutdownGracePeriod)
+	defer waitTimer.Stop()
+
+	select {
+	case err := <-waitDone:
+		return normalizeCodexWaitErr(err)
+	case <-waitTimer.C:
+		if cmd.Process != nil {
+			logger.Warn("codex process wait exceeded grace period after turn completion", "pid", cmd.Process.Pid)
+			_ = cmd.Process.Kill()
+		}
+		finalTimer := time.NewTimer(codexForcedShutdownWait)
+		defer finalTimer.Stop()
+		select {
+		case err := <-waitDone:
+			return normalizeCodexWaitErr(err)
+		case <-finalTimer.C:
+			return fmt.Errorf("codex process did not exit after forced shutdown")
+		}
+	}
+}
+
+func normalizeCodexWaitErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "signal: killed") || strings.Contains(msg, "signal: terminated") {
+		return nil
+	}
+	return err
+}
+
 // ── codexClient: JSON-RPC 2.0 transport ──
 
 type codexClient struct {
-	cfg       Config
-	stdin     interface{ Write([]byte) (int, error) }
-	mu        sync.Mutex
-	nextID    int
-	pending   map[int]*pendingRPC
-	threadID  string
-	turnID    string
-	onMessage func(Message)
+	cfg        Config
+	stdin      interface{ Write([]byte) (int, error) }
+	mu         sync.Mutex
+	nextID     int
+	pending    map[int]*pendingRPC
+	threadID   string
+	turnID     string
+	onMessage  func(Message)
 	onTurnDone func(aborted bool)
 
 	notificationProtocol string // "unknown", "legacy", "raw"

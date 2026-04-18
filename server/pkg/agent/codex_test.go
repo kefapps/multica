@@ -1,11 +1,15 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newTestCodexClient(t *testing.T) (*codexClient, *fakeStdin, []Message) {
@@ -541,5 +545,92 @@ func TestCodexProtocolDetectionLegacyBlocksRaw(t *testing.T) {
 
 	if len(messages) != messagesBefore {
 		t.Fatal("raw notification should be ignored in legacy mode")
+	}
+}
+
+func TestCodexExecuteCompletesAfterSilentIdle(t *testing.T) {
+	t.Helper()
+
+	oldGrace := codexSilentTurnGracePeriod
+	oldPoll := codexSilentTurnPollInterval
+	oldShutdown := codexShutdownGracePeriod
+	oldForced := codexForcedShutdownWait
+	codexSilentTurnGracePeriod = 150 * time.Millisecond
+	codexSilentTurnPollInterval = 25 * time.Millisecond
+	codexShutdownGracePeriod = 250 * time.Millisecond
+	codexForcedShutdownWait = 100 * time.Millisecond
+	t.Cleanup(func() {
+		codexSilentTurnGracePeriod = oldGrace
+		codexSilentTurnPollInterval = oldPoll
+		codexShutdownGracePeriod = oldShutdown
+		codexForcedShutdownWait = oldForced
+	})
+
+	tmpDir := t.TempDir()
+	execPath := filepath.Join(tmpDir, "codex")
+	script := `#!/usr/bin/env python3
+import json
+import sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+    elif method == "thread/start":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"thread": {"id": "thread-1"}}})
+    elif method == "turn/start":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"ok": True}})
+        send({"jsonrpc": "2.0", "method": "turn/started", "params": {"turn": {"id": "turn-1"}}})
+        send({"jsonrpc": "2.0", "method": "item/completed", "params": {"item": {"type": "agentMessage", "id": "msg-1", "text": "hello from fake codex"}}})
+`
+	if err := os.WriteFile(execPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex executable: %v", err)
+	}
+
+	backend := &codexBackend{
+		cfg: Config{
+			ExecutablePath: execPath,
+			Logger:         slog.Default(),
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	session, err := backend.Execute(ctx, "diagnose the issue", ExecOptions{
+		Cwd:     tmpDir,
+		Timeout: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var sawMessage bool
+	for msg := range session.Messages {
+		if msg.Type == MessageText && msg.Content == "hello from fake codex" {
+			sawMessage = true
+		}
+	}
+
+	result := <-session.Result
+	if result.Status != "completed" {
+		t.Fatalf("expected completed status, got %q (error=%q)", result.Status, result.Error)
+	}
+	if result.Error != "" {
+		t.Fatalf("expected no final error, got %q", result.Error)
+	}
+	if result.Output != "hello from fake codex" {
+		t.Fatalf("expected captured output, got %q", result.Output)
+	}
+	if !sawMessage {
+		t.Fatal("expected streamed message before idle completion")
 	}
 }
