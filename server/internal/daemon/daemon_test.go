@@ -307,6 +307,63 @@ func TestSelectPreferredRepoURLFromIssueDescription(t *testing.T) {
 	}
 }
 
+func TestSelectPreferredRepoURLFromIssueDescriptionRepoSlug(t *testing.T) {
+	t.Parallel()
+
+	task := Task{
+		Repos: []RepoData{
+			{URL: "https://github.com/kefapps/roundtable", Description: "Roundtable fork repository"},
+			{URL: "https://github.com/kefapps/konfront", Description: "Konfront product repository"},
+		},
+	}
+	issueData := map[string]any{
+		"description": "Run Codex on konfront and verify silent-turn diagnostics.",
+	}
+
+	got := selectPreferredRepoURL(task, issueData)
+	if got != "https://github.com/kefapps/konfront" {
+		t.Fatalf("selectPreferredRepoURL() = %q, want konfront repo URL", got)
+	}
+}
+
+func TestSelectPreferredRepoURLReturnsEmptyOnAmbiguousAlias(t *testing.T) {
+	t.Parallel()
+
+	task := Task{
+		Repos: []RepoData{
+			{URL: "https://github.com/kefapps/roundtable", Description: "Roundtable fork repository"},
+			{URL: "https://github.com/kefapps/konfront", Description: "Konfront product repository"},
+		},
+	}
+	issueData := map[string]any{
+		"description": "Compare roundtable and konfront for this investigation.",
+	}
+
+	got := selectPreferredRepoURL(task, issueData)
+	if got != "" {
+		t.Fatalf("selectPreferredRepoURL() = %q, want empty string on ambiguity", got)
+	}
+}
+
+func TestSelectPreferredRepoURLFromIssueTitle(t *testing.T) {
+	t.Parallel()
+
+	task := Task{
+		Repos: []RepoData{
+			{URL: "https://github.com/kefapps/roundtable", Description: "Roundtable fork repository"},
+			{URL: "https://github.com/kefapps/konfront", Description: "Konfront product repository"},
+		},
+	}
+	issueData := map[string]any{
+		"title": "Konfront ADR follow-up",
+	}
+
+	got := selectPreferredRepoURL(task, issueData)
+	if got != "https://github.com/kefapps/konfront" {
+		t.Fatalf("selectPreferredRepoURL() = %q, want konfront repo URL from title", got)
+	}
+}
+
 func TestSelectPreferredRepoURLSingleRepoFallback(t *testing.T) {
 	t.Parallel()
 

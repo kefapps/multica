@@ -1387,6 +1387,9 @@ func selectPreferredRepoURL(task Task, issueData map[string]any) string {
 	if desc, ok := issueDescription(issueData); ok {
 		candidates = append(candidates, desc)
 	}
+	if title, ok := issueTitle(issueData); ok {
+		candidates = append(candidates, title)
+	}
 	if strings.TrimSpace(task.TriggerCommentContent) != "" {
 		candidates = append(candidates, task.TriggerCommentContent)
 	}
@@ -1403,6 +1406,34 @@ func selectPreferredRepoURL(task Task, issueData map[string]any) string {
 			if strings.Contains(text, repoURL) {
 				return repoURL
 			}
+		}
+	}
+
+	matches := make(map[string]struct{})
+	for _, text := range candidates {
+		normalizedText := normalizeRepoSelectionText(text)
+		if normalizedText == "" {
+			continue
+		}
+		for _, repo := range task.Repos {
+			repoURL := strings.TrimSpace(repo.URL)
+			if repoURL == "" {
+				continue
+			}
+			for _, alias := range repoSelectionAliases(repo) {
+				if alias == "" {
+					continue
+				}
+				if normalizedRepoSelectionContains(normalizedText, alias) {
+					matches[repoURL] = struct{}{}
+					break
+				}
+			}
+		}
+	}
+	if len(matches) == 1 {
+		for repoURL := range matches {
+			return repoURL
 		}
 	}
 	return ""
@@ -1425,6 +1456,85 @@ func issueDescription(issueData map[string]any) (string, bool) {
 		return "", false
 	}
 	return desc, true
+}
+
+func issueTitle(issueData map[string]any) (string, bool) {
+	if len(issueData) == 0 {
+		return "", false
+	}
+	raw, ok := issueData["title"]
+	if !ok {
+		return "", false
+	}
+	title, ok := raw.(string)
+	if !ok {
+		return "", false
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "", false
+	}
+	return title, true
+}
+
+func repoSelectionAliases(repo RepoData) []string {
+	aliases := []string{}
+	pushAlias := func(value string) {
+		value = normalizeRepoSelectionText(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range aliases {
+			if existing == value {
+				return
+			}
+		}
+		aliases = append(aliases, value)
+	}
+
+	pushAlias(repo.Description)
+
+	repoURL := strings.TrimSpace(repo.URL)
+	if repoURL != "" {
+		pushAlias(repoURL)
+		trimmed := strings.TrimSuffix(strings.TrimPrefix(repoURL, "https://github.com/"), ".git")
+		parts := strings.Split(strings.Trim(trimmed, "/"), "/")
+		if len(parts) >= 2 {
+			pushAlias(parts[len(parts)-2] + " " + parts[len(parts)-1])
+			pushAlias(parts[len(parts)-1])
+		}
+	}
+
+	return aliases
+}
+
+func normalizeRepoSelectionText(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastSpace := true
+	for _, r := range value {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			lastSpace = false
+		default:
+			if !lastSpace {
+				b.WriteByte(' ')
+				lastSpace = true
+			}
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func normalizedRepoSelectionContains(normalizedText, normalizedAlias string) bool {
+	if normalizedText == "" || normalizedAlias == "" {
+		return false
+	}
+	return strings.Contains(" "+normalizedText+" ", " "+normalizedAlias+" ")
 }
 
 // shortID returns the first 8 characters of an ID for readable logs.
