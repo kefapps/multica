@@ -288,6 +288,40 @@ func TestSyncWorkspacesFromAPIUpdatesReposForExistingWorkspace(t *testing.T) {
 	}
 }
 
+func TestSelectPreferredRepoURLFromIssueDescription(t *testing.T) {
+	t.Parallel()
+
+	task := Task{
+		Repos: []RepoData{
+			{URL: "https://github.com/kefapps/roundtable", Description: "Roundtable"},
+			{URL: "https://github.com/kefapps/konfront", Description: "Konfront"},
+		},
+	}
+	issueData := map[string]any{
+		"description": "Travaille sur le repo https://github.com/kefapps/konfront pour cette ADR.",
+	}
+
+	got := selectPreferredRepoURL(task, issueData)
+	if got != "https://github.com/kefapps/konfront" {
+		t.Fatalf("selectPreferredRepoURL() = %q, want konfront repo URL", got)
+	}
+}
+
+func TestSelectPreferredRepoURLSingleRepoFallback(t *testing.T) {
+	t.Parallel()
+
+	task := Task{
+		Repos: []RepoData{
+			{URL: "https://github.com/kefapps/konfront", Description: "Konfront"},
+		},
+	}
+
+	got := selectPreferredRepoURL(task, nil)
+	if got != "https://github.com/kefapps/konfront" {
+		t.Fatalf("selectPreferredRepoURL() = %q, want single repo URL", got)
+	}
+}
+
 func TestMergeUsage(t *testing.T) {
 	t.Parallel()
 

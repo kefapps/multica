@@ -36,11 +36,12 @@ var codexRemovedFiles = []string{
 const codexRepoOverlayPath = ".multica/codex-task.toml"
 
 type CodexHomeParams struct {
-	CodexHome      string
-	WorkspacesRoot string
-	WorkspaceID    string
-	Repos          []RepoContextForEnv
-	Logger         *slog.Logger
+	CodexHome        string
+	WorkspacesRoot   string
+	WorkspaceID      string
+	Repos            []RepoContextForEnv
+	PreferredRepoURL string
+	Logger           *slog.Logger
 }
 
 // defaultCodexConfig is the minimal config.toml for Codex tasks.
@@ -93,7 +94,7 @@ func prepareCodexHome(params CodexHomeParams) error {
 		_ = os.Remove(filepath.Join(params.CodexHome, name))
 	}
 
-	overlay, overlaySource, overlayErr := loadCodexRepoOverlay(params.WorkspacesRoot, params.WorkspaceID, params.Repos, logger)
+	overlay, overlaySource, overlayErr := loadCodexRepoOverlay(params.WorkspacesRoot, params.WorkspaceID, params.Repos, params.PreferredRepoURL, logger)
 	if overlayErr != nil {
 		logger.Warn("execenv: codex-home repo overlay unavailable, using baseline config only", "error", overlayErr)
 		overlay = ""
@@ -261,7 +262,7 @@ func mergeTOMLMap(dst, src map[string]any) {
 	}
 }
 
-func loadCodexRepoOverlay(workspacesRoot, workspaceID string, repos []RepoContextForEnv, logger *slog.Logger) (string, string, error) {
+func loadCodexRepoOverlay(workspacesRoot, workspaceID string, repos []RepoContextForEnv, preferredRepoURL string, logger *slog.Logger) (string, string, error) {
 	if workspacesRoot == "" || workspaceID == "" || len(repos) == 0 {
 		return "", "", nil
 	}
@@ -272,8 +273,23 @@ func loadCodexRepoOverlay(workspacesRoot, workspaceID string, repos []RepoContex
 		body   string
 	}
 
+	trimmedPreferred := strings.TrimSpace(preferredRepoURL)
+	filteredRepos := repos
+	if trimmedPreferred != "" {
+		filteredRepos = nil
+		for _, repo := range repos {
+			if strings.EqualFold(strings.TrimSpace(repo.URL), trimmedPreferred) {
+				filteredRepos = append(filteredRepos, repo)
+				break
+			}
+		}
+		if len(filteredRepos) == 0 {
+			return "", "", fmt.Errorf("preferred repo overlay requested for %q but repo not present in task context", trimmedPreferred)
+		}
+	}
+
 	var matches []candidate
-	for _, repo := range repos {
+	for _, repo := range filteredRepos {
 		barePath := cache.Lookup(workspaceID, repo.URL)
 		if barePath == "" {
 			continue

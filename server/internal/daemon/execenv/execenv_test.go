@@ -26,6 +26,12 @@ func testCodexHomeParams(codexHome, workspacesRoot, workspaceID string, repos []
 	}
 }
 
+func testCodexHomeParamsWithPreferredRepo(codexHome, workspacesRoot, workspaceID string, repos []RepoContextForEnv, preferredRepoURL string) CodexHomeParams {
+	params := testCodexHomeParams(codexHome, workspacesRoot, workspaceID, repos)
+	params.PreferredRepoURL = preferredRepoURL
+	return params
+}
+
 func createOverlayRepo(t *testing.T, overlay string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -972,6 +978,50 @@ allow_commands = ["git"]
 		if !strings.Contains(s, expectedRoot) {
 			t.Fatalf("config.toml missing repo writable root %q: %s", expectedRoot, s)
 		}
+	}
+}
+
+func TestPrepareCodexHomeSelectsPreferredRepoOverlay(t *testing.T) {
+	sharedHome := t.TempDir()
+	t.Setenv("CODEX_HOME", sharedHome)
+
+	firstRepo := createOverlayRepo(t, `model = "first"`)
+	secondRepo := createOverlayRepo(t, `model = "second"`)
+
+	workspacesRoot := t.TempDir()
+	cache := repocache.New(filepath.Join(workspacesRoot, ".repos"), testLogger())
+	if err := cache.Sync("ws-overlay", []repocache.RepoInfo{
+		{URL: firstRepo, Description: "first repo"},
+		{URL: secondRepo, Description: "second repo"},
+	}); err != nil {
+		t.Fatalf("cache sync failed: %v", err)
+	}
+
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	params := testCodexHomeParamsWithPreferredRepo(
+		codexHome,
+		workspacesRoot,
+		"ws-overlay",
+		[]RepoContextForEnv{
+			{URL: firstRepo, Description: "first repo"},
+			{URL: secondRepo, Description: "second repo"},
+		},
+		secondRepo,
+	)
+	if err := prepareCodexHome(params); err != nil {
+		t.Fatalf("prepareCodexHome failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "model = 'second'") {
+		t.Fatalf("config.toml missing preferred repo overlay: %s", s)
+	}
+	if strings.Contains(s, "model = 'first'") {
+		t.Fatalf("config.toml included wrong repo overlay: %s", s)
 	}
 }
 

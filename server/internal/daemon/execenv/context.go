@@ -96,6 +96,7 @@ func nonNilTaskData(ctx TaskContextForEnv) map[string]any {
 		"chat_session_id":         ctx.ChatSessionID,
 		"agent_id":                ctx.AgentID,
 		"agent_name":              ctx.AgentName,
+		"preferred_repo_url":      ctx.PreferredRepoURL,
 	}
 }
 

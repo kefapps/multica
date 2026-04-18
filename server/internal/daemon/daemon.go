@@ -840,6 +840,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	}
 
 	issueData, commentsData := d.fetchInitialTaskContextData(ctx, task, taskLog, taskStart)
+	preferredRepoURL := selectPreferredRepoURL(task, issueData)
 
 	// Prepare isolated execution environment.
 	// Repos are passed as metadata only — the agent checks them out on demand
@@ -852,9 +853,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		AgentName:             agentName,
 		AgentInstructions:     instructions,
 		AgentSkills:           convertSkillsForEnv(skills),
+		PreferredRepoURL:      preferredRepoURL,
 		Repos:                 convertReposForEnv(task.Repos),
 		ChatSessionID:         task.ChatSessionID,
-		TaskData:              buildTaskData(task, provider, agentName),
+		TaskData:              buildTaskData(task, provider, agentName, preferredRepoURL),
 		IssueData:             issueData,
 		CommentsData:          commentsData,
 	}
@@ -1213,7 +1215,7 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 	}
 }
 
-func buildTaskData(task Task, provider, agentName string) map[string]any {
+func buildTaskData(task Task, provider, agentName, preferredRepoURL string) map[string]any {
 	return map[string]any{
 		"id":                      task.ID,
 		"issue_id":                task.IssueID,
@@ -1228,6 +1230,7 @@ func buildTaskData(task Task, provider, agentName string) map[string]any {
 		"chat_message":            task.ChatMessage,
 		"prior_session_id":        task.PriorSessionID,
 		"prior_work_dir":          task.PriorWorkDir,
+		"preferred_repo_url":      preferredRepoURL,
 	}
 }
 
@@ -1332,6 +1335,58 @@ func convertReposForEnv(repos []RepoData) []execenv.RepoContextForEnv {
 		result[i] = execenv.RepoContextForEnv{URL: r.URL, Description: r.Description}
 	}
 	return result
+}
+
+func selectPreferredRepoURL(task Task, issueData map[string]any) string {
+	if len(task.Repos) == 0 {
+		return ""
+	}
+	if len(task.Repos) == 1 {
+		return task.Repos[0].URL
+	}
+
+	var candidates []string
+	if desc, ok := issueDescription(issueData); ok {
+		candidates = append(candidates, desc)
+	}
+	if strings.TrimSpace(task.TriggerCommentContent) != "" {
+		candidates = append(candidates, task.TriggerCommentContent)
+	}
+	if strings.TrimSpace(task.ChatMessage) != "" {
+		candidates = append(candidates, task.ChatMessage)
+	}
+
+	for _, text := range candidates {
+		for _, repo := range task.Repos {
+			repoURL := strings.TrimSpace(repo.URL)
+			if repoURL == "" {
+				continue
+			}
+			if strings.Contains(text, repoURL) {
+				return repoURL
+			}
+		}
+	}
+	return ""
+}
+
+func issueDescription(issueData map[string]any) (string, bool) {
+	if len(issueData) == 0 {
+		return "", false
+	}
+	raw, ok := issueData["description"]
+	if !ok {
+		return "", false
+	}
+	desc, ok := raw.(string)
+	if !ok {
+		return "", false
+	}
+	desc = strings.TrimSpace(desc)
+	if desc == "" {
+		return "", false
+	}
+	return desc, true
 }
 
 // shortID returns the first 8 characters of an ID for readable logs.
