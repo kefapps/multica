@@ -798,6 +798,54 @@ func TestCodexRawMetadataNotificationsAreIgnored(t *testing.T) {
 	}
 }
 
+func TestCodexRawLifecycleNotificationsAreIgnored(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.notificationProtocol = "raw"
+	c.diagnostics = newCodexDiagnostics(time.Unix(0, 0))
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"mcpServer/startupStatus/updated","params":{"server":{"name":"foo"},"status":{"type":"ready"}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"thread-42"}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"userMessage","id":"user-1"}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"userMessage","id":"user-1"}}}`)
+
+	snapshot := c.diagnostics.snapshot(c.notificationProtocol, c.turnStarted, c.turnID, len(c.completedTurnIDs))
+	if got := snapshot["notification_count"]; got != 4 {
+		t.Fatalf("expected notification_count=4, got %v", got)
+	}
+	if got := snapshot["unhandled_notification_count"]; got != 0 {
+		t.Fatalf("expected unhandled_notification_count=0, got %v", got)
+	}
+	if c.threadID != "thread-42" {
+		t.Fatalf("expected threadID to be updated, got %q", c.threadID)
+	}
+}
+
+func TestCodexRawLifecycleNotificationsAreIgnoredFromUnknownProtocol(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.diagnostics = newCodexDiagnostics(time.Unix(0, 0))
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"mcpServer/startupStatus/updated","params":{"server":{"name":"foo"},"status":{"type":"ready"}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"thread-42"}}}`)
+
+	snapshot := c.diagnostics.snapshot(c.notificationProtocol, c.turnStarted, c.turnID, len(c.completedTurnIDs))
+	if got := snapshot["notification_count"]; got != 2 {
+		t.Fatalf("expected notification_count=2, got %v", got)
+	}
+	if got := snapshot["unhandled_notification_count"]; got != 0 {
+		t.Fatalf("expected unhandled_notification_count=0, got %v", got)
+	}
+	if c.notificationProtocol != "raw" {
+		t.Fatalf("expected protocol to switch to raw, got %q", c.notificationProtocol)
+	}
+	if c.threadID != "thread-42" {
+		t.Fatalf("expected threadID to be updated, got %q", c.threadID)
+	}
+}
+
 func TestCodexRawInternalItemLifecycleIsIgnored(t *testing.T) {
 	t.Parallel()
 

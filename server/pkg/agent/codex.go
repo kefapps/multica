@@ -915,9 +915,13 @@ func (c *codexClient) handleNotification(raw map[string]json.RawMessage) {
 
 	// Raw v2 notifications
 	if c.notificationProtocol != "legacy" {
-		if c.notificationProtocol == "unknown" &&
+		if (c.notificationProtocol == "" || c.notificationProtocol == "unknown") &&
 			(method == "turn/started" || method == "turn/completed" ||
-				method == "thread/started" || strings.HasPrefix(method, "item/")) {
+				method == "thread/started" || strings.HasPrefix(method, "item/") ||
+				method == "account/rateLimits/updated" ||
+				method == "thread/tokenUsage/updated" ||
+				method == "turn/diff/updated" ||
+				method == "mcpServer/startupStatus/updated") {
 			c.notificationProtocol = "raw"
 		}
 
@@ -1052,6 +1056,11 @@ func (c *codexClient) handleRawNotification(method string, params map[string]any
 			c.onTurnDone(aborted)
 		}
 
+	case "thread/started":
+		if threadID := extractNestedString(params, "thread", "id"); threadID != "" {
+			c.threadID = threadID
+		}
+
 	case "thread/status/changed":
 		statusType := extractNestedString(params, "status", "type")
 		if statusType == "idle" && c.turnStarted {
@@ -1066,7 +1075,7 @@ func (c *codexClient) handleRawNotification(method string, params map[string]any
 		}
 		c.extractUsageFromMap(params)
 
-	case "account/rateLimits/updated", "turn/diff/updated":
+	case "account/rateLimits/updated", "turn/diff/updated", "mcpServer/startupStatus/updated":
 		// Metadata-only notifications. They are useful for diagnostics, but they
 		// do not correspond to user-visible output or completion semantics.
 		return
@@ -1152,6 +1161,12 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 		return true, detail
 
 	case method == "item/completed" && itemType == "reasoning":
+		return true, detail
+
+	case method == "item/started" && itemType == "userMessage":
+		return true, detail
+
+	case method == "item/completed" && itemType == "userMessage":
 		return true, detail
 
 	case method == "item/started" && itemType == "commandExecution":
